@@ -114,6 +114,7 @@ The long arguments live next to the modules they belong to:
 | [documentation/path.md](documentation/path.md) | Lexical paths and the environment |
 | [documentation/thread-pool.md](documentation/thread-pool.md) | The worker pool |
 | [documentation/sequencer.md](documentation/sequencer.md) | The reorder buffer |
+| [documentation/random.md](documentation/random.md) | The random engine and the seeded algorithms |
 
 `make docs` builds the manual from the headers.
 
