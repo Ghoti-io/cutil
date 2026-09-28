@@ -1468,23 +1468,27 @@ coverage: ## Build instrumented, run the tests, and report line coverage
 
 .PHONY: oracle-build oracle-version check-oracle
 
-oracle-build: ## Build the OpenJDK oracle image from its pinned Containerfile
+oracle-build: ## Build the pinned oracle images from their Containerfiles
 	@printf "\n### Building the OpenJDK oracle image ###\n"
 	docker build -t localhost/ghoti-cutil-oracle-java:21.0.12 \
 		-f tools/oracle/containers/java/Containerfile \
 		tools/oracle/containers/java
+	@printf "\n### Building the xoshiro256++ and PCG64 oracle image ###\n"
+	docker build -t localhost/ghoti-cutil-oracle-prng:rand-0.10.3 \
+		-f tools/oracle/containers/prng/Containerfile \
+		tools/oracle
 
-oracle-version: ## Print the OpenJDK the random oracle would use
-	@GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java -- true
+oracle-version: ## Print the references the random oracle would use
+	@GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java,pcg,xoshiro -- true
 
-$(APP_DIR)/random-words: examples/random_words.c $(APP_DIR)/$(TARGET)
+$(APP_DIR)/random-words: examples/random_words.c $(APP_DIR)/$(TARGET) $(FLAGS_STAMP)
 	@printf "\n### Compiling the random oracle driver ###\n"
 	$(CC) -std=c17 -Wall -Wextra -Werror $(INCLUDE) -o $@ $< $(LDFLAGS) $(CUTILLIBRARY)
 
-check-oracle: ## Judge Java's Random and SplittableRandom against OpenJDK
+check-oracle: ## Judge the seeded generators against OpenJDK, Rust, and pcg-c
 check-oracle: $(APP_DIR)/random-words
 	@LD_LIBRARY_PATH="$(APP_DIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
-		GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java -- \
+		GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java,pcg,xoshiro -- \
 		python3 tools/oracle/random_diff.py $(APP_DIR)/random-words
 
 help: ## Display this help

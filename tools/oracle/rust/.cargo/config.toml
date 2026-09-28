@@ -1,0 +1,9 @@
+# The check compiles inside the image, where this directory was filled by
+# `cargo vendor --locked` at image build. A host cargo build has no such
+# directory and is not how the oracle runs.
+
+[source.crates-io]
+replace-with = "ghoti-oracle-vendor"
+
+[source.ghoti-oracle-vendor]
+directory = "/usr/local/share/ghoti-oracle/vendor"

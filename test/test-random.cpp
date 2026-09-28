@@ -241,9 +241,11 @@ TEST(Random, Xoshiro256pp) {
 }
 
 TEST(Random, Pcg64) {
+  /* pcg64_srandom_r(rng, 1, 0) then pcg64_random_r. The draw advances
+   * before it outputs, so this is not the state srandom leaves behind. */
   const uint64_t words[] = {
-    0xABE1E0E53261800AULL, 0x71564BA1920863F1ULL,
-    0x06F710DFF5126DAFULL, 0xAF595B987D60EA49ULL
+    0x71564BA1920863F1ULL, 0x06F710DFF5126DAFULL,
+    0xAF595B987D60EA49ULL, 0xA3D0BB4A02495B7FULL
   };
   GCU_Random * r = gcu_random_pcg64(1);
   ASSERT_NE(r, nullptr);

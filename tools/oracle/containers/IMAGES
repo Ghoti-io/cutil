@@ -4,9 +4,12 @@
 #
 # This image is built here, so the tag is not a digest of the finished image.
 # What is pinned is everything the build reads — the Debian base by digest,
-# the JDK by full apt version — and the run-time check is the guarantee.
+# the compilers and the JDK by full apt version, pcg-c by commit, rand by
+# exact crate version — and the run-time check is the guarantee.
 #
 # Building it:
 #   make oracle-build
 
 java	localhost/ghoti-cutil-oracle-java:21.0.12	openjdk 21.0.12	java.util.Random.nextInt and SplittableRandom.nextLong
+pcg	localhost/ghoti-cutil-oracle-prng:rand-0.10.3	pcg-c 83252d9c23df9c82ecb42210afed61a7b42402d7	O'Neill pcg64_srandom_r(seed, 0) then pcg64_random_r
+xoshiro	localhost/ghoti-cutil-oracle-prng:rand-0.10.3	rustc 1.85.1 rand 0.10.3	rand Xoshiro256PlusPlus::seed_from_u64

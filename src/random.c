@@ -639,9 +639,8 @@ static uint64_t pcg_output(U128 state) {
 
 
 static uint64_t pcg_step(PcgBox * box) {
-  U128 old = box->state;
-  box->state = u128_add(u128_mul(old, PCG_MULT), box->inc);
-  return pcg_output(old);
+  box->state = u128_add(u128_mul(box->state, PCG_MULT), box->inc);
+  return pcg_output(box->state);
 }
 
 

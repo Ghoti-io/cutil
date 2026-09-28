@@ -139,21 +139,24 @@ without learning which generator it was given.
 `kernel_fill` must not keep unused kernel bytes for a later call. A `fork`
 would duplicate them into the child.
 
-## 6. What judges the Java sequences
+## 6. What judges the sequences
 
 `make test` does not run a container. The words in the unit test are a
 record of a sequence, and a record can be copied from the implementation
 that is supposed to be under test.
 
-`make check-oracle` asks OpenJDK. The image is
-`localhost/ghoti-cutil-oracle-java:21.0.12`, built from
-`tools/oracle/containers/java/Containerfile`. The base is Debian 13 slim at
-the same digest the rest of the suite pins, and the JDK is
-`openjdk-21-jdk-headless=21.0.12.1+1-1~deb13u1`. `java-version` must report
-`openjdk 21.0.12`.
+`make check-oracle` asks three references. `make oracle-build` builds the
+images. Each image is built here, so the finished image has no digest to
+pin. The base is Debian 13 slim at the same digest the rest of the suite
+pins, and the package versions are pinned in the Containerfile.
 
-`gcu_random_java` is judged by `java.util.Random.nextInt`.
-`gcu_random_splitmix64` is judged by `java.util.SplittableRandom.nextLong`.
-xoshiro256++ and PCG64 are not Java generators, so this oracle does not
-speak for them. `Random.nextLong` is not `gcu_random_u64` on the Java
-handle, and the oracle does not compare those two.
+| Generator | Judge | Image |
+| --- | --- | --- |
+| `gcu_random_java` | `java.util.Random.nextInt` | `localhost/ghoti-cutil-oracle-java:21.0.12`. The JDK is `openjdk-21-jdk-headless=21.0.12.1+1-1~deb13u1`. `java-version` must report `openjdk 21.0.12`. |
+| `gcu_random_splitmix64` | `java.util.SplittableRandom.nextLong` | The same OpenJDK image. |
+| `gcu_random_xoshiro256pp` | `rand::rngs::Xoshiro256PlusPlus::seed_from_u64`, then `next_u64` | `localhost/ghoti-cutil-oracle-prng:rand-0.10.3`. `rustc` is `1.85.1+dfsg1-1+deb13u1` and `rand` is `0.10.3`. `xoshiro-version` must report `rustc 1.85.1 rand 0.10.3`. |
+| `gcu_random_pcg64` | `pcg64_srandom_r(rng, seed, 0)` then `pcg64_random_r` | The same image. pcg-c is commit `83252d9c23df9c82ecb42210afed61a7b42402d7`. `pcg-version` must report that commit. |
+
+`Random.nextLong` is not `gcu_random_u64` on the Java handle, and the
+oracle does not compare those two. The Mersenne Twister is judged by the
+C++ standard library in the unit test.

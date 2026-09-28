@@ -65,8 +65,8 @@ sudo make install
 | `make test-asan` | Rebuild with ASan and UBSan and run the suite |
 | `make test-tsan` | The concurrency tests under ThreadSanitizer |
 | `make docs` | The Doxygen manual, into `./docs` |
-| `make oracle-build` | Build the pinned OpenJDK image |
-| `make check-oracle` | Judge `java.util.Random` and `SplittableRandom` against that image |
+| `make oracle-build` | Build the pinned OpenJDK, Rust, and pcg-c images |
+| `make check-oracle` | Judge Java's generators, xoshiro256++, and PCG64 against those images |
 
 `make test` does not run a container. `make check-oracle` does, and it fails if the image is missing.
 

@@ -1,0 +1,26 @@
+#!/bin/sh
+# Print the pinned rustc and rand, or the real ones and a failure.
+#
+# The rustc check wants 1.85.1 as its own token. A later 1.85.10 must not
+# pass a prefix test, and a Debian revision suffix on the package is not
+# what rustc --version prints.
+set -eu
+got=$(rustc --version | head -n 1)
+case $got in
+  'rustc 1.85.1 '*)
+    ;;
+  *)
+    printf '%s\n' "$got" >&2
+    exit 1
+    ;;
+esac
+rand=$(cat /usr/local/share/ghoti-oracle/rand-version)
+case $rand in
+  0.10.3)
+    ;;
+  *)
+    printf '%s\n' "$rand" >&2
+    exit 1
+    ;;
+esac
+printf '%s\n' 'rustc 1.85.1 rand 0.10.3'

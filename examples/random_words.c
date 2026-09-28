@@ -38,7 +38,7 @@ int main(int argc, char ** argv) {
   GCU_Random * r;
 
   if (argc != 4) {
-    die("usage: random_words java|splitmix seed count");
+    die("usage: random_words java|splitmix|xoshiro|pcg seed count");
   }
   seed = strtoull(argv[2], &end, 10);
   if (end == argv[2] || *end != '\0') {
@@ -66,6 +66,20 @@ int main(int argc, char ** argv) {
     if (r == NULL) {
       die("gcu_random_splitmix64 failed");
     }
+  } else if (strcmp(argv[1], "xoshiro") == 0) {
+    r = gcu_random_xoshiro256pp((uint64_t)seed);
+    if (r == NULL) {
+      die("gcu_random_xoshiro256pp failed");
+    }
+  } else if (strcmp(argv[1], "pcg") == 0) {
+    r = gcu_random_pcg64((uint64_t)seed);
+    if (r == NULL) {
+      die("gcu_random_pcg64 failed");
+    }
+  } else {
+    die("unknown generator");
+  }
+  if (strcmp(argv[1], "java") != 0) {
     for (i = 0; i < count; ++i) {
       uint64_t word = 0;
       if (gcu_random_u64(r, &word) != 0) {
@@ -73,8 +87,6 @@ int main(int argc, char ** argv) {
       }
       printf("%016" PRIx64 "\n", word);
     }
-  } else {
-    die("unknown generator");
   }
   gcu_random_free(r);
   return 0;

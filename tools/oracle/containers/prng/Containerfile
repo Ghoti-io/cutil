@@ -1,0 +1,51 @@
+# Rust's Xoshiro256PlusPlus and O'Neill's pcg-c, the judges for the two
+# generators OpenJDK does not speak for.
+#
+# Built here, so the finished image has no digest to pin. Everything the
+# build reads is pinned instead: the Debian base by digest, the compilers
+# by full apt version, pcg-c by commit, and rand by exact crate version.
+# pcg-version and xoshiro-version are what a second build has to satisfy.
+# documentation/random.md.
+#
+# The apt pin stops resolving when the archive drops it. That failure is the
+# point: an unpinned `apt-get install rustc` would silently move the oracle.
+FROM docker.io/library/debian:13-slim@sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc1635634368b878189e8221c
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates=20250419 \
+      cargo=1.85.1+dfsg1-1+deb13u1 \
+      gcc=4:14.2.0-1 \
+      git=1:2.47.3-0+deb13u1 \
+      libc6-dev=2.41-12+deb13u4 \
+      make=4.4.1-2 \
+      rustc=1.85.1+dfsg1-1+deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch one commit. A branch tip would move under the same Containerfile.
+RUN git init /usr/local/src/pcg-c \
+    && git -C /usr/local/src/pcg-c remote add origin https://github.com/imneme/pcg-c.git \
+    && git -C /usr/local/src/pcg-c fetch --depth 1 origin 83252d9c23df9c82ecb42210afed61a7b42402d7 \
+    && git -C /usr/local/src/pcg-c checkout --detach FETCH_HEAD \
+    && test "$(git -C /usr/local/src/pcg-c rev-parse HEAD)" = "83252d9c23df9c82ecb42210afed61a7b42402d7" \
+    && make -C /usr/local/src/pcg-c/src \
+    && mkdir -p /usr/local/share/ghoti-oracle \
+    && git -C /usr/local/src/pcg-c rev-parse HEAD > /usr/local/share/ghoti-oracle/pcg-c-commit \
+    && rm -rf /usr/local/src/pcg-c/.git
+
+# The lockfile is the pin for every crate rand 0.10.3 pulls in. The vendor
+# directory is what a later `cargo build --offline --locked` reads. The
+# project's own .cargo/config.toml is not copied here: this step still talks
+# to crates.io, and the check does not.
+COPY rust/Cargo.toml rust/Cargo.lock /tmp/xoshiro-pin/
+COPY rust/src/main.rs /tmp/xoshiro-pin/src/main.rs
+RUN cargo vendor --locked --manifest-path /tmp/xoshiro-pin/Cargo.toml \
+      /usr/local/share/ghoti-oracle/vendor \
+    && printf '%s\n' '0.10.3' > /usr/local/share/ghoti-oracle/rand-version \
+    && rm -rf /tmp/xoshiro-pin
+
+COPY containers/prng/pcg-version containers/prng/xoshiro-version /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/pcg-version /usr/local/bin/xoshiro-version

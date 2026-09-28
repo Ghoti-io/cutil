@@ -47,6 +47,8 @@ class OracleUnavailable(Exception):
 # puts a quoting layer between the check and the fact it checks.
 PROBE = {
     "java": (["java-version"], "openjdk 21.0.12"),
+    "pcg": (["pcg-version"], "pcg-c 83252d9c23df9c82ecb42210afed61a7b42402d7"),
+    "xoshiro": (["xoshiro-version"], "rustc 1.85.1 rand 0.10.3"),
 }
 
 _pins = None
