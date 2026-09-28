@@ -51,70 +51,84 @@ extern "C" {
 
 
 /**
- * The state structure for the 32-bit Mersenne Twister.
+ * The 624-word state of MT19937, the C++ std::mt19937 engine.
+ *
+ * state_index is the next word to twist, always in [0, 623].
  */
 typedef struct GCU_Random_MT32_State {
   /**
-   * The state array for the Mersenne Twister.
+   * The 624 state words.
    */
   uint32_t state_array[GCU_RANDOM_MT_STATE_SIZE32];
   /**
-   * The index into the state array, which is used to determine the next value
-   * to be generated.
-   *
-   * This value is always in the range [0, n-1].
+   * The next word to twist. Always in [0, 623].
    */
   size_t state_index;
 } GCU_Random_MT32_State;
 
 /**
- * Initialize the 32-bit Mersenne Twister state with the given seed.
+ * Seed an MT19937 state the way std::mt19937::seed does.
  *
- * @param state A pointer to the state structure to be initialized.
- * @param seed A seed value with which to initialize the state.
+ * state[0] = seed. For i from 1 to 623,
+ * state[i] = 1812433253 * (state[i - 1] xor (state[i - 1] >> 30)) + i.
+ * The next call of gcu_random_mt32_next() is then std::mt19937::operator().
+ *
+ * @param state The state to initialise.
+ * @param seed The single word std::mt19937::seed accepts. This is not
+ * Python's random.Random seed and not NumPy's MT19937 SeedSequence.
  */
 GCU_API void gcu_random_mt32_init(GCU_Random_MT32_State * state, uint32_t seed);
 
 /**
- * Generate the next random number from the 32-bit Mersenne Twister state.
+ * The next tempered MT19937 word.
  *
- * @param state A pointer to the state structure from which to generate the next
- * random number.
- * @return The next random number in the sequence.
+ * The twist and the temper are the std::mt19937 parameters: n = 624,
+ * m = 397, r = 31, a = 0x9908B0DF, and (u, d, s, b, t, c, l) =
+ * (11, 0xFFFFFFFF, 7, 0x9D2C5680, 15, 0xEFC60000, 18).
+ *
+ * @param state The state to advance.
+ * @return The tempered 32-bit word.
  */
 GCU_API uint32_t gcu_random_mt32_next(GCU_Random_MT32_State * state);
 
 /**
- * The state structure for the 64-bit Mersenne Twister.
+ * The 312-word state of MT19937-64, the C++ std::mt19937_64 engine.
+ *
+ * state_index is the next word to twist, always in [0, 311].
  */
 typedef struct GCU_Random_MT64_State {
   /**
-   * The state array for the Mersenne Twister.
+   * The 312 state words.
    */
   uint64_t state_array[GCU_RANDOM_MT_STATE_SIZE64];
   /**
-   * The index into the state array, which is used to determine the next value
-   * to be generated.
-   *
-   * This value is always in the range [0, n-1].
+   * The next word to twist. Always in [0, 311].
    */
   size_t state_index;
 } GCU_Random_MT64_State;
 
 /**
- * Initialize the 64-bit Mersenne Twister state with the given seed.
+ * Seed an MT19937-64 state the way std::mt19937_64::seed does.
  *
- * @param state A pointer to the state structure to be initialized.
- * @param seed A seed value with which to initialize the state.
+ * state[0] = seed. For i from 1 to 311,
+ * state[i] = 6364136223846793005 * (state[i - 1] xor (state[i - 1] >> 62)) + i.
+ * The next call of gcu_random_mt64_next() is then std::mt19937_64::operator().
+ *
+ * @param state The state to initialise.
+ * @param seed The single word std::mt19937_64::seed accepts. This is not
+ * Python's random.Random seed and not NumPy's MT19937 SeedSequence.
  */
 GCU_API void gcu_random_mt64_init(GCU_Random_MT64_State * state, uint64_t seed);
 
 /**
- * Generate the next random number from the 64-bit Mersenne Twister state.
+ * The next tempered MT19937-64 word.
  *
- * @param state A pointer to the state structure from which to generate the next
- * random number.
- * @return The next random number in the sequence.
+ * The twist and the temper are the std::mt19937_64 parameters: n = 312,
+ * m = 156, r = 31, a = 0xB5026F5AA96619E9, and (u, d, s, b, t, c, l) =
+ * (29, 0x5555555555555555, 17, 0x71D67FFFEDA60000, 37, 0xFFF7EEE000000000, 43).
+ *
+ * @param state The state to advance.
+ * @return The tempered 64-bit word.
  */
 GCU_API uint64_t gcu_random_mt64_next(GCU_Random_MT64_State * state);
 
@@ -257,20 +271,24 @@ GCU_API int gcu_random_f64(GCU_Random * r, double * out);
 GCU_API int gcu_random_below(GCU_Random * r, uint64_t bound, uint64_t * out);
 
 /**
- * A handle over MT19937, the std::mt19937 sequence.
+ * A handle over MT19937 (Matsumoto and Nishimura, 1998).
  *
- * The native word is 32 bits. gcu_random_u32() on this handle matches
- * gcu_random_mt32_next() on a state initialised with the same seed.
+ * The sequence is C++ std::mt19937: the parameters and the seed named on
+ * gcu_random_mt32_init() and gcu_random_mt32_next(). The native word is 32
+ * bits, so gcu_random_u32() matches gcu_random_mt32_next() for the same seed.
  *
- * @param seed The standard 32-bit Mersenne Twister seed.
+ * @param seed Passed to gcu_random_mt32_init().
  * @return The handle, or NULL if allocation failed.
  */
 GCU_API GCU_Random * gcu_random_mt32(uint32_t seed);
 
 /**
- * A handle over MT19937-64, the std::mt19937_64 sequence.
+ * A handle over MT19937-64 (Matsumoto and Nishimura).
  *
- * @param seed The standard 64-bit Mersenne Twister seed.
+ * The sequence is C++ std::mt19937_64: the parameters and the seed named on
+ * gcu_random_mt64_init() and gcu_random_mt64_next().
+ *
+ * @param seed Passed to gcu_random_mt64_init().
  * @return The handle, or NULL if allocation failed.
  */
 GCU_API GCU_Random * gcu_random_mt64(uint64_t seed);

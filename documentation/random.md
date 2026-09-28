@@ -97,25 +97,35 @@ wants draws uses the handle.
 
 | Constructor | Algorithm | Seed |
 | --- | --- | --- |
-| `gcu_random_mt32(uint32_t seed)` | MT19937, the C++ `std::mt19937` sequence | The standard 32-bit initialisation. |
-| `gcu_random_mt64(uint64_t seed)` | MT19937-64, the C++ `std::mt19937_64` sequence | The standard 64-bit initialisation. |
+| `gcu_random_mt32(uint32_t seed)` | MT19937 (Matsumoto and Nishimura, 1998), the C++ `std::mt19937` word | `state[0] = seed`. For `i` from 1 to 623, `state[i] = 1812433253 * (state[i - 1] xor (state[i - 1] >> 30)) + i`. That is `mersenne_twister_engine::seed`. |
+| `gcu_random_mt64(uint64_t seed)` | MT19937-64 (Matsumoto and Nishimura), the C++ `std::mt19937_64` word | `state[0] = seed`. For `i` from 1 to 311, `state[i] = 6364136223846793005 * (state[i - 1] xor (state[i - 1] >> 62)) + i`. |
 | `gcu_random_java(uint64_t seed)` | `java.util.Random`, the 48-bit linear congruential generator | Same as `setSeed`: `(seed ^ 0x5DEECE66D) & ((1 << 48) - 1)`. The native word is 32 bits, the top of the 48-bit state, which is `nextInt()`. |
 | `gcu_random_splitmix64(uint64_t seed)` | SplitMix64, `java.util.SplittableRandom.nextLong` | The seed is stored as the state. The first draw adds the golden-ratio constant, then mixes. |
 | `gcu_random_xoshiro256pp(uint64_t seed)` | xoshiro256++ (Blackman and Vigna) | One `uint64_t`, expanded to four state words with SplitMix64. The recommended default when a new stream has no sequence it must match. The all-zero state is not a valid xoshiro state; this seed function does not produce it. |
 | `gcu_random_pcg64(uint64_t seed)` | PCG64 XSL-RR 128/64 (O'Neill), NumPy's `PCG64` output function | `srandom(seed, 0)` from the reference implementation: one stream, increment fixed from a sequence of 0. This is not NumPy's `SeedSequence` and not `numpy.random.default_rng`. |
 
+Those two rows are the C++11 typedefs. `std::mt19937` has word size 32,
+n = 624, m = 397, r = 31, a = `0x9908B0DF`, temper
+(u, d, s, b, t, c, l) = (11, `0xFFFFFFFF`, 7, `0x9D2C5680`, 15,
+`0xEFC60000`, 18), and initialisation multiplier f = 1812433253.
+`std::mt19937_64` has word size 64, n = 312, m = 156, r = 31,
+a = `0xB5026F5AA96619E9`, temper (29, `0x5555555555555555`, 17,
+`0x71D67FFFEDA60000`, 37, `0xFFF7EEE000000000`, 43), and
+f = 6364136223846793005. The native word is `operator()` after that seed.
+
 A caller matching a language reads the row, not the shared `f64`. In
 particular, .NET's seeded `Random(int)` is still the old Knuth generator,
 and its unseeded `Random` is xoshiro256** rather than xoshiro256++. Go's
-`math/rand/v2` PCG is not this PCG64. Python's `random.Random` needs that
-language's array seed and its own float; the raw MT19937 words here match
-C++ `std::mt19937`, which is the recurrence Python uses, not Python's
-seeding.
+`math/rand/v2` PCG is not this PCG64. Python's `random.Random` and NumPy's
+`MT19937` (the legacy `RandomState` and `Generator`) use the MT19937
+recurrence and a different seed; the raw words here match C++ `std::mt19937`,
+not those seedings. Python's float is its own assembly of bits, which
+`gcu_random_f64()` is not.
 
 ## 5. A generator that lives in another library
 
-Security keeps the kernel call. It does not link into CUtil, and CUtil does
-not call it. The constructor lives in security and looks like this:
+Security ships the kernel constructor. It does not link into CUtil, and
+CUtil does not call it.
 
 ```c
 static int kernel_fill(void * ctx, void * out, size_t n) {

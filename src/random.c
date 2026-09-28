@@ -25,8 +25,9 @@
 #include <stdint.h>
 #include <string.h>
 
-// For reference, see the Mersenne Twister pseudocode from Wikipedia:
-// https://en.wikipedia.org/wiki/Mersenne_Twister
+// MT19937 and MT19937-64, the C++ std::mt19937 and std::mt19937_64
+// parameters. The seed is mersenne_twister_engine::seed: state[0] = seed,
+// then the f-recurrence. The constants below are those typedefs.
 
 
 void gcu_random_mt32_init(GCU_Random_MT32_State * state, uint32_t seed) {
