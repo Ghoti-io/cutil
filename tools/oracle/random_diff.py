@@ -15,8 +15,8 @@
 random_words is this library. OpenJDK judges java.util.Random.nextInt and
 SplittableRandom.nextLong. Rust's Xoshiro256PlusPlus::seed_from_u64 judges
 xoshiro256++. O'Neill's pcg64_srandom_r(seed, 0) then pcg64_random_r judges
-PCG64. The Mersenne Twister is judged by the C++ standard library in the
-unit test, not here.
+PCG64. libstdc++'s std::mt19937 and std::mt19937_64 judge the Mersenne
+Twister.
 """
 
 import os
@@ -30,6 +30,7 @@ import oracle_env
 HERE = os.path.dirname(os.path.abspath(__file__))
 JAVA_SOURCE = os.path.join(HERE, "java", "RandomOracle.java")
 PCG_SOURCE = os.path.join(HERE, "pcg", "pcg_oracle.c")
+MT_SOURCE = os.path.join(HERE, "mt", "mt_oracle.cpp")
 RUST_DIR = os.path.join(HERE, "rust")
 PCG_INCLUDE = "/usr/local/src/pcg-c/include"
 PCG_ARCHIVE = "/usr/local/src/pcg-c/src/libpcg_random.a"
@@ -51,6 +52,17 @@ WORD_CASES = (
     ("pcg", "0", "32"),
     ("pcg", "1", "32"),
     ("pcg", "123456789", "32"),
+)
+# 1248 words is two trips through MT19937's 624-word state, and four trips
+# through MT19937-64's 312-word state. 305419896 is 0x12345678.
+# 1311768467294899695 is 0x1234567890ABCDEF.
+MT_CASES = (
+    ("mt32", "0", "1248"),
+    ("mt32", "1", "1248"),
+    ("mt32", "305419896", "1248"),
+    ("mt64", "0", "1248"),
+    ("mt64", "1", "1248"),
+    ("mt64", "1311768467294899695", "1248"),
 )
 
 
@@ -88,7 +100,7 @@ def main(argv):
         sys.stderr.write("usage: random_diff.py <random_words>\n")
         return 2
     binary = argv[1]
-    for path in (JAVA_SOURCE, PCG_SOURCE, os.path.join(RUST_DIR, "src", "main.rs")):
+    for path in (JAVA_SOURCE, PCG_SOURCE, MT_SOURCE, os.path.join(RUST_DIR, "src", "main.rs")):
         if not os.path.isfile(path):
             sys.stderr.write("missing %s\n" % path)
             return 1
@@ -102,6 +114,11 @@ def main(argv):
             "-o", os.path.join(scratch, "pcg-oracle"),
             PCG_SOURCE, PCG_ARCHIVE,
         ], scratch)
+        compile_in("mt", [
+            "g++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
+            "-o", os.path.join(scratch, "mt-oracle"),
+            MT_SOURCE,
+        ], scratch)
         compile_in("xoshiro", [
             "cargo", "build", "--offline", "--locked", "--release",
             "--manifest-path", os.path.join(RUST_DIR, "Cargo.toml"),
@@ -110,6 +127,7 @@ def main(argv):
         xoshiro_bin = os.path.join(
             scratch, "xoshiro-target", "release", "xoshiro-oracle")
         pcg_bin = os.path.join(scratch, "pcg-oracle")
+        mt_bin = os.path.join(scratch, "mt-oracle")
 
         for ours, theirs, seed, count in JAVA_CASES:
             library = subprocess.run(
@@ -139,6 +157,19 @@ def main(argv):
             expect = lines_of(reference, "%s %s" % (judge, seed))
             if got != expect:
                 disagree(ours, seed, judge, got, expect)
+                return 1
+            print("%s seed %s: %s words match" % (ours, seed, count))
+
+        for ours, seed, count in MT_CASES:
+            library = subprocess.run(
+                [binary, ours, seed, count], capture_output=True, text=True)
+            reference = subprocess.run(
+                oracle_env.command("mt", [mt_bin, ours, seed, count], scratch=scratch),
+                capture_output=True, text=True)
+            got = lines_of(library, "%s %s %s" % (binary, ours, seed))
+            expect = lines_of(reference, "mt %s %s" % (ours, seed))
+            if got != expect:
+                disagree(ours, seed, "libstdc++", got, expect)
                 return 1
             print("%s seed %s: %s words match" % (ours, seed, count))
     finally:

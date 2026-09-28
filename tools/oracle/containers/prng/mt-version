@@ -1,0 +1,16 @@
+#!/bin/sh
+# Print the pinned libstdc++ identity, or the real one and a failure.
+#
+# The parenthetical is the Debian package revision. 14.2.0-190 must not
+# satisfy a prefix check of 14.2.0-19.
+set -eu
+got=$(g++ --version | head -n 1)
+case $got in
+  'g++ (Debian 14.2.0-19) 14.2.0')
+    printf '%s\n' 'g++ 14.2.0 libstdc++ 14.2.0-19'
+    ;;
+  *)
+    printf '%s\n' "$got" >&2
+    exit 1
+    ;;
+esac

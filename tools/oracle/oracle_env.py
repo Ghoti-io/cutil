@@ -49,6 +49,7 @@ PROBE = {
     "java": (["java-version"], "openjdk 21.0.12"),
     "pcg": (["pcg-version"], "pcg-c 83252d9c23df9c82ecb42210afed61a7b42402d7"),
     "xoshiro": (["xoshiro-version"], "rustc 1.85.1 rand 0.10.3"),
+    "mt": (["mt-version"], "g++ 14.2.0 libstdc++ 14.2.0-19"),
 }
 
 _pins = None

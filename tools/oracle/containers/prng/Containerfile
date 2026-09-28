@@ -1,11 +1,11 @@
-# Rust's Xoshiro256PlusPlus and O'Neill's pcg-c, the judges for the two
-# generators OpenJDK does not speak for.
+# Rust's Xoshiro256PlusPlus, O'Neill's pcg-c, and libstdc++'s Mersenne
+# Twister. OpenJDK judges the other two generators.
 #
 # Built here, so the finished image has no digest to pin. Everything the
 # build reads is pinned instead: the Debian base by digest, the compilers
 # by full apt version, pcg-c by commit, and rand by exact crate version.
-# pcg-version and xoshiro-version are what a second build has to satisfy.
-# documentation/random.md.
+# pcg-version, xoshiro-version, and mt-version are what a second build has
+# to satisfy. documentation/random.md.
 #
 # The apt pin stops resolving when the archive drops it. That failure is the
 # point: an unpinned `apt-get install rustc` would silently move the oracle.
@@ -18,9 +18,11 @@ RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends \
       ca-certificates=20250419 \
       cargo=1.85.1+dfsg1-1+deb13u1 \
+      g++=4:14.2.0-1 \
       gcc=4:14.2.0-1 \
       git=1:2.47.3-0+deb13u1 \
       libc6-dev=2.41-12+deb13u4 \
+      libstdc++-14-dev=14.2.0-19 \
       make=4.4.1-2 \
       rustc=1.85.1+dfsg1-1+deb13u1 \
     && rm -rf /var/lib/apt/lists/*
@@ -47,5 +49,5 @@ RUN cargo vendor --locked --manifest-path /tmp/xoshiro-pin/Cargo.toml \
     && printf '%s\n' '0.10.3' > /usr/local/share/ghoti-oracle/rand-version \
     && rm -rf /tmp/xoshiro-pin
 
-COPY containers/prng/pcg-version containers/prng/xoshiro-version /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/pcg-version /usr/local/bin/xoshiro-version
+COPY containers/prng/mt-version containers/prng/pcg-version containers/prng/xoshiro-version /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/mt-version /usr/local/bin/pcg-version /usr/local/bin/xoshiro-version

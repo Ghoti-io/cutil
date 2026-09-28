@@ -145,7 +145,7 @@ would duplicate them into the child.
 record of a sequence, and a record can be copied from the implementation
 that is supposed to be under test.
 
-`make check-oracle` asks three references. `make oracle-build` builds the
+`make check-oracle` asks four references. `make oracle-build` builds the
 images. Each image is built here, so the finished image has no digest to
 pin. The base is Debian 13 slim at the same digest the rest of the suite
 pins, and the package versions are pinned in the Containerfile.
@@ -156,7 +156,8 @@ pins, and the package versions are pinned in the Containerfile.
 | `gcu_random_splitmix64` | `java.util.SplittableRandom.nextLong` | The same OpenJDK image. |
 | `gcu_random_xoshiro256pp` | `rand::rngs::Xoshiro256PlusPlus::seed_from_u64`, then `next_u64` | `localhost/ghoti-cutil-oracle-prng:rand-0.10.3`. `rustc` is `1.85.1+dfsg1-1+deb13u1` and `rand` is `0.10.3`. `xoshiro-version` must report `rustc 1.85.1 rand 0.10.3`. |
 | `gcu_random_pcg64` | `pcg64_srandom_r(rng, seed, 0)` then `pcg64_random_r` | The same image. pcg-c is commit `83252d9c23df9c82ecb42210afed61a7b42402d7`. `pcg-version` must report that commit. |
+| `gcu_random_mt32` | `std::mt19937` | The same image. `g++` is `4:14.2.0-1` and `libstdc++-14-dev` is `14.2.0-19`. `mt-version` must report `g++ 14.2.0 libstdc++ 14.2.0-19`. The comparison is 1248 words, two trips through the 624-word state. |
+| `gcu_random_mt64` | `std::mt19937_64` | The same image and the same word count, which is four trips through the 312-word state. |
 
 `Random.nextLong` is not `gcu_random_u64` on the Java handle, and the
-oracle does not compare those two. The Mersenne Twister is judged by the
-C++ standard library in the unit test.
+oracle does not compare those two.

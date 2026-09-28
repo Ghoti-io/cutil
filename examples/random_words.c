@@ -38,7 +38,7 @@ int main(int argc, char ** argv) {
   GCU_Random * r;
 
   if (argc != 4) {
-    die("usage: random_words java|splitmix|xoshiro|pcg seed count");
+    die("usage: random_words java|mt32|splitmix|xoshiro|pcg|mt64 seed count");
   }
   seed = strtoull(argv[2], &end, 10);
   if (end == argv[2] || *end != '\0') {
@@ -54,12 +54,13 @@ int main(int argc, char ** argv) {
     if (r == NULL) {
       die("gcu_random_java failed");
     }
-    for (i = 0; i < count; ++i) {
-      uint32_t word = 0;
-      if (gcu_random_u32(r, &word) != 0) {
-        die("gcu_random_u32 failed");
-      }
-      printf("%08" PRIx32 "\n", word);
+  } else if (strcmp(argv[1], "mt32") == 0) {
+    if (seed > UINT32_MAX) {
+      die("mt32 seed does not fit in 32 bits");
+    }
+    r = gcu_random_mt32((uint32_t)seed);
+    if (r == NULL) {
+      die("gcu_random_mt32 failed");
     }
   } else if (strcmp(argv[1], "splitmix") == 0) {
     r = gcu_random_splitmix64((uint64_t)seed);
@@ -76,10 +77,23 @@ int main(int argc, char ** argv) {
     if (r == NULL) {
       die("gcu_random_pcg64 failed");
     }
+  } else if (strcmp(argv[1], "mt64") == 0) {
+    r = gcu_random_mt64((uint64_t)seed);
+    if (r == NULL) {
+      die("gcu_random_mt64 failed");
+    }
   } else {
     die("unknown generator");
   }
-  if (strcmp(argv[1], "java") != 0) {
+  if (strcmp(argv[1], "java") == 0 || strcmp(argv[1], "mt32") == 0) {
+    for (i = 0; i < count; ++i) {
+      uint32_t word = 0;
+      if (gcu_random_u32(r, &word) != 0) {
+        die("gcu_random_u32 failed");
+      }
+      printf("%08" PRIx32 "\n", word);
+    }
+  } else {
     for (i = 0; i < count; ++i) {
       uint64_t word = 0;
       if (gcu_random_u64(r, &word) != 0) {

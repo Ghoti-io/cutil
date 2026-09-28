@@ -13,3 +13,4 @@
 java	localhost/ghoti-cutil-oracle-java:21.0.12	openjdk 21.0.12	java.util.Random.nextInt and SplittableRandom.nextLong
 pcg	localhost/ghoti-cutil-oracle-prng:rand-0.10.3	pcg-c 83252d9c23df9c82ecb42210afed61a7b42402d7	O'Neill pcg64_srandom_r(seed, 0) then pcg64_random_r
 xoshiro	localhost/ghoti-cutil-oracle-prng:rand-0.10.3	rustc 1.85.1 rand 0.10.3	rand Xoshiro256PlusPlus::seed_from_u64
+mt	localhost/ghoti-cutil-oracle-prng:rand-0.10.3	g++ 14.2.0 libstdc++ 14.2.0-19	std::mt19937 and std::mt19937_64
