@@ -100,7 +100,7 @@ instead of copying it. `filelock.h` locks a whole file between processes.
 **The rest.** `utf.h` converts between UTF-8 and UTF-16. `error.h` is the
 last operating-system error, without caring which operating system.
 `subprocess.h` runs a program and collects its output. `library.h` loads a
-shared library at run time. `random.h` is a caller-owned Mersenne Twister.
+shared library at run time. `random.h` is one handle over a seeded generator, or over an engine another library supplies.
 `type.h` is the sized unions and the fixed-width floats.
 
 ## Documentation

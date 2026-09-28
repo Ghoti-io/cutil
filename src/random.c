@@ -20,7 +20,9 @@
 
 
 #include <ghoti.io/cutil/macros.h>
+#include <ghoti.io/cutil/memory.h>
 #include <ghoti.io/cutil/random.h>
+#include <string.h>
 
 // For reference, see the Mersenne Twister pseudocode from Wikipedia:
 // https://en.wikipedia.org/wiki/Mersenne_Twister
@@ -137,4 +139,304 @@ uint64_t gcu_random_mt64_next(GCU_Random_MT64_State * state) {
   x ^= (x << tempering_t) & tempering_c;
   x ^= x >> tempering_l;
   return x;
+}
+
+
+struct GCU_Random {
+  GCU_Random_Engine engine;
+};
+
+
+struct BytePump {
+  unsigned char pending[8];
+  unsigned off;
+  unsigned len;
+  unsigned word_bytes;
+  int (* produce)(void * inner, unsigned char * le);
+  void * inner;
+};
+
+
+static void wipe(void * p, size_t n) {
+  if (p != NULL && n != 0) {
+    memset(p, 0, n);
+  }
+}
+
+
+static void free_ctx(void * ctx) {
+  gcu_free(ctx);
+}
+
+
+static void mul_wide(uint64_t a, uint64_t b, uint64_t * lo, uint64_t * hi) {
+#if defined(__SIZEOF_INT128__)
+  __uint128_t m = (__uint128_t)a * b;
+  *lo = (uint64_t)m;
+  *hi = (uint64_t)(m >> 64);
+#else
+  uint64_t a0 = (uint32_t)a;
+  uint64_t a1 = a >> 32;
+  uint64_t b0 = (uint32_t)b;
+  uint64_t b1 = b >> 32;
+  uint64_t p0 = a0 * b0;
+  uint64_t p1 = a0 * b1;
+  uint64_t p2 = a1 * b0;
+  uint64_t p3 = a1 * b1;
+  uint64_t mid = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
+  *lo = (p0 & 0xffffffffu) | (mid << 32);
+  *hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+#endif
+}
+
+
+static int byte_pump_fill(void * ctx, void * out, size_t n) {
+  struct BytePump * pump = ctx;
+  unsigned char * dst = out;
+  size_t left = n;
+
+  if (n == 0) {
+    return 0;
+  }
+  while (left != 0) {
+    size_t have;
+    size_t take;
+    if (pump->off == pump->len) {
+      if (pump->produce(pump->inner, pump->pending) != 0) {
+        wipe(out, n);
+        return -1;
+      }
+      pump->off = 0;
+      pump->len = pump->word_bytes;
+    }
+    have = (size_t)(pump->len - pump->off);
+    take = left < have ? left : have;
+    memcpy(dst, pump->pending + pump->off, take);
+    pump->off += (unsigned)take;
+    dst += take;
+    left -= take;
+  }
+  return 0;
+}
+
+
+static void store_u32_le(uint32_t w, unsigned char * le) {
+  le[0] = (unsigned char)w;
+  le[1] = (unsigned char)(w >> 8);
+  le[2] = (unsigned char)(w >> 16);
+  le[3] = (unsigned char)(w >> 24);
+}
+
+
+static void store_u64_le(uint64_t w, unsigned char * le) {
+  le[0] = (unsigned char)w;
+  le[1] = (unsigned char)(w >> 8);
+  le[2] = (unsigned char)(w >> 16);
+  le[3] = (unsigned char)(w >> 24);
+  le[4] = (unsigned char)(w >> 32);
+  le[5] = (unsigned char)(w >> 40);
+  le[6] = (unsigned char)(w >> 48);
+  le[7] = (unsigned char)(w >> 56);
+}
+
+
+static uint32_t load_u32_le(const unsigned char * le) {
+  return (uint32_t)le[0]
+    | ((uint32_t)le[1] << 8)
+    | ((uint32_t)le[2] << 16)
+    | ((uint32_t)le[3] << 24);
+}
+
+
+static uint64_t load_u64_le(const unsigned char * le) {
+  return (uint64_t)le[0]
+    | ((uint64_t)le[1] << 8)
+    | ((uint64_t)le[2] << 16)
+    | ((uint64_t)le[3] << 24)
+    | ((uint64_t)le[4] << 32)
+    | ((uint64_t)le[5] << 40)
+    | ((uint64_t)le[6] << 48)
+    | ((uint64_t)le[7] << 56);
+}
+
+
+GCU_Random * gcu_random_from_engine(const GCU_Random_Engine * engine) {
+  GCU_Random * r;
+  if (engine == NULL || engine->fill == NULL) {
+    return NULL;
+  }
+  r = gcu_malloc(sizeof *r);
+  if (r == NULL) {
+    return NULL;
+  }
+  r->engine = *engine;
+  return r;
+}
+
+
+void gcu_random_free(GCU_Random * r) {
+  if (r == NULL) {
+    return;
+  }
+  if (r->engine.destroy != NULL) {
+    r->engine.destroy(r->engine.ctx);
+  }
+  gcu_free(r);
+}
+
+
+int gcu_random_bytes(GCU_Random * r, void * out, size_t n) {
+  if (r == NULL || r->engine.fill == NULL || (out == NULL && n != 0)) {
+    return -1;
+  }
+  if (n == 0) {
+    return 0;
+  }
+  if (r->engine.fill(r->engine.ctx, out, n) != 0) {
+    wipe(out, n);
+    return -1;
+  }
+  return 0;
+}
+
+
+int gcu_random_u32(GCU_Random * r, uint32_t * out) {
+  unsigned char b[4];
+  if (out == NULL) {
+    return -1;
+  }
+  if (gcu_random_bytes(r, b, sizeof b) != 0) {
+    *out = 0;
+    return -1;
+  }
+  *out = load_u32_le(b);
+  return 0;
+}
+
+
+int gcu_random_u64(GCU_Random * r, uint64_t * out) {
+  unsigned char b[8];
+  if (out == NULL) {
+    return -1;
+  }
+  if (gcu_random_bytes(r, b, sizeof b) != 0) {
+    *out = 0;
+    return -1;
+  }
+  *out = load_u64_le(b);
+  return 0;
+}
+
+
+int gcu_random_f64(GCU_Random * r, double * out) {
+  uint64_t u;
+  if (out == NULL) {
+    return -1;
+  }
+  if (gcu_random_u64(r, &u) != 0) {
+    *out = 0.0;
+    return -1;
+  }
+  *out = (double)(u >> 11) * (1.0 / 9007199254740992.0);
+  return 0;
+}
+
+
+int gcu_random_below(GCU_Random * r, uint64_t bound, uint64_t * out) {
+  uint64_t x;
+  uint64_t lo;
+  uint64_t hi;
+  uint64_t threshold;
+  if (r == NULL || out == NULL || bound == 0) {
+    return -1;
+  }
+  if (gcu_random_u64(r, &x) != 0) {
+    *out = 0;
+    return -1;
+  }
+  mul_wide(x, bound, &lo, &hi);
+  if (lo < bound) {
+    threshold = (uint64_t)(0 - bound) % bound;
+    while (lo < threshold) {
+      if (gcu_random_u64(r, &x) != 0) {
+        *out = 0;
+        return -1;
+      }
+      mul_wide(x, bound, &lo, &hi);
+    }
+  }
+  *out = hi;
+  return 0;
+}
+
+
+typedef struct {
+  struct BytePump pump;
+  GCU_Random_MT32_State mt;
+} Mt32Box;
+
+
+typedef struct {
+  struct BytePump pump;
+  GCU_Random_MT64_State mt;
+} Mt64Box;
+
+
+static int mt32_produce(void * inner, unsigned char * le) {
+  store_u32_le(gcu_random_mt32_next(inner), le);
+  return 0;
+}
+
+
+static int mt64_produce(void * inner, unsigned char * le) {
+  store_u64_le(gcu_random_mt64_next(inner), le);
+  return 0;
+}
+
+
+GCU_Random * gcu_random_mt32(uint32_t seed) {
+  Mt32Box * box;
+  GCU_Random_Engine engine;
+  GCU_Random * r;
+  box = gcu_malloc(sizeof *box);
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  gcu_random_mt32_init(&box->mt, seed);
+  box->pump.word_bytes = 4;
+  box->pump.produce = mt32_produce;
+  box->pump.inner = &box->mt;
+  engine.ctx = box;
+  engine.fill = byte_pump_fill;
+  engine.destroy = free_ctx;
+  r = gcu_random_from_engine(&engine);
+  if (r == NULL) {
+    gcu_free(box);
+  }
+  return r;
+}
+
+
+GCU_Random * gcu_random_mt64(uint64_t seed) {
+  Mt64Box * box;
+  GCU_Random_Engine engine;
+  GCU_Random * r;
+  box = gcu_malloc(sizeof *box);
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  gcu_random_mt64_init(&box->mt, seed);
+  box->pump.word_bytes = 8;
+  box->pump.produce = mt64_produce;
+  box->pump.inner = &box->mt;
+  engine.ctx = box;
+  engine.fill = byte_pump_fill;
+  engine.destroy = free_ctx;
+  r = gcu_random_from_engine(&engine);
+  if (r == NULL) {
+    gcu_free(box);
+  }
+  return r;
 }

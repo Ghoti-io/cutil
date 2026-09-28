@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <cstring>
 #include <random>
 #include <sstream>
 #include <gtest/gtest.h>
@@ -26,6 +28,169 @@ TEST(Random, MT) {
       EXPECT_EQ(mt(), gcu_random_mt64_next(&state));
     }
   }
+}
+
+TEST(Random, EngineMatchesTheNativeWord) {
+  uint32_t seed32 = 0x12345678;
+  GCU_Random * r32 = gcu_random_mt32(seed32);
+  ASSERT_NE(r32, nullptr);
+  mt19937 mt32(seed32);
+  for (int i = 0; i < GCU_RANDOM_MT_STATE_SIZE32 * 2; ++i) {
+    uint32_t word = 0;
+    ASSERT_EQ(0, gcu_random_u32(r32, &word));
+    EXPECT_EQ(mt32(), word);
+  }
+  gcu_random_free(r32);
+
+  uint64_t seed64 = 0x1234567890ABCDEF;
+  GCU_Random * r64 = gcu_random_mt64(seed64);
+  ASSERT_NE(r64, nullptr);
+  mt19937_64 mt64(seed64);
+  for (int i = 0; i < GCU_RANDOM_MT_STATE_SIZE64 * 2; ++i) {
+    uint64_t word = 0;
+    ASSERT_EQ(0, gcu_random_u64(r64, &word));
+    EXPECT_EQ(mt64(), word);
+  }
+  gcu_random_free(r64);
+}
+
+TEST(Random, Mt32U64IsTwoWordsLowFirst) {
+  uint32_t seed = 0x12345678;
+  GCU_Random * r = gcu_random_mt32(seed);
+  ASSERT_NE(r, nullptr);
+  mt19937 mt(seed);
+  uint64_t word = 0;
+  ASSERT_EQ(0, gcu_random_u64(r, &word));
+  uint32_t low = mt();
+  uint32_t high = mt();
+  EXPECT_EQ(low, (uint32_t)word);
+  EXPECT_EQ(high, (uint32_t)(word >> 32));
+  gcu_random_free(r);
+}
+
+TEST(Random, PartialBytesStayInTheEngine) {
+  uint32_t seed = 1;
+  GCU_Random * whole = gcu_random_mt32(seed);
+  GCU_Random * split = gcu_random_mt32(seed);
+  ASSERT_NE(whole, nullptr);
+  ASSERT_NE(split, nullptr);
+  unsigned char one[4];
+  unsigned char rest[3];
+  unsigned char four[4];
+  ASSERT_EQ(0, gcu_random_bytes(whole, four, 4));
+  ASSERT_EQ(0, gcu_random_bytes(split, one, 1));
+  ASSERT_EQ(0, gcu_random_bytes(split, rest, 3));
+  EXPECT_EQ(four[0], one[0]);
+  EXPECT_EQ(0, memcmp(four + 1, rest, 3));
+  gcu_random_free(whole);
+  gcu_random_free(split);
+}
+
+TEST(Random, FloatIsTheTop53Bits) {
+  GCU_Random * r = gcu_random_mt64(1);
+  ASSERT_NE(r, nullptr);
+  uint64_t word = 0;
+  double value = -1.0;
+  ASSERT_EQ(0, gcu_random_u64(r, &word));
+  gcu_random_free(r);
+  r = gcu_random_mt64(1);
+  ASSERT_EQ(0, gcu_random_f64(r, &value));
+  EXPECT_GE(value, 0.0);
+  EXPECT_LT(value, 1.0);
+  EXPECT_DOUBLE_EQ((double)(word >> 11) * (1.0 / 9007199254740992.0), value);
+  gcu_random_free(r);
+}
+
+struct Seq {
+  const uint64_t * words;
+  size_t count;
+  size_t index;
+};
+
+static int seq_fill(void * ctx, void * out, size_t n) {
+  Seq * seq = static_cast<Seq *>(ctx);
+  auto * p = static_cast<unsigned char *>(out);
+  while (n != 0) {
+    if (seq->index >= seq->count || n < 8) {
+      memset(out, 0, n);
+      return -1;
+    }
+    uint64_t w = seq->words[seq->index++];
+    for (int b = 0; b < 8; ++b) {
+      p[b] = static_cast<unsigned char>(w >> (8 * b));
+    }
+    p += 8;
+    n -= 8;
+  }
+  return 0;
+}
+
+TEST(Random, BelowRejectsAndIsUnbiased) {
+  const uint64_t words[] = { 0, 5 };
+  Seq seq = { words, 2, 0 };
+  GCU_Random_Engine engine = { &seq, seq_fill, NULL };
+  GCU_Random * r = gcu_random_from_engine(&engine);
+  ASSERT_NE(r, nullptr);
+  uint64_t out = 99;
+  EXPECT_NE(0, gcu_random_below(r, 0, &out));
+  EXPECT_EQ(99u, out);
+  out = 99;
+  ASSERT_EQ(0, gcu_random_below(r, ~uint64_t{0}, &out));
+  EXPECT_EQ(4u, out);
+  EXPECT_EQ(2u, seq.index);
+  gcu_random_free(r);
+}
+
+static int fail_fill(void * ctx, void * out, size_t n) {
+  (void)ctx;
+  memset(out, 0xa5, n);
+  return -1;
+}
+
+static int destroyed = 0;
+
+static void mark_destroyed(void * ctx) {
+  (void)ctx;
+  destroyed = 1;
+}
+
+TEST(Random, FailureWipesAndDestroyRuns) {
+  GCU_Random_Engine engine = { NULL, fail_fill, mark_destroyed };
+  GCU_Random * r = gcu_random_from_engine(&engine);
+  ASSERT_NE(r, nullptr);
+  uint64_t out = 0x1111;
+  EXPECT_NE(0, gcu_random_u64(r, &out));
+  EXPECT_EQ(0u, out);
+  unsigned char buf[4] = { 1, 2, 3, 4 };
+  EXPECT_NE(0, gcu_random_bytes(r, buf, 4));
+  EXPECT_EQ(0, buf[0]);
+  EXPECT_EQ(0, buf[3]);
+  destroyed = 0;
+  gcu_random_free(r);
+  EXPECT_EQ(1, destroyed);
+  gcu_random_free(NULL);
+  EXPECT_EQ(NULL, gcu_random_from_engine(NULL));
+  GCU_Random_Engine no_fill = { NULL, NULL, NULL };
+  EXPECT_EQ(NULL, gcu_random_from_engine(&no_fill));
+}
+
+TEST(Random, TwoHandlesDoNotInterfere) {
+  GCU_Random * a = gcu_random_mt64(1);
+  GCU_Random * b = gcu_random_mt64(2);
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  mt19937_64 ma(1);
+  mt19937_64 mb(2);
+  for (int i = 0; i < 8; ++i) {
+    uint64_t wa = 0;
+    uint64_t wb = 0;
+    ASSERT_EQ(0, gcu_random_u64(b, &wb));
+    ASSERT_EQ(0, gcu_random_u64(a, &wa));
+    EXPECT_EQ(mb(), wb);
+    EXPECT_EQ(ma(), wa);
+  }
+  gcu_random_free(a);
+  gcu_random_free(b);
 }
 
 int main(int argc, char** argv) {
