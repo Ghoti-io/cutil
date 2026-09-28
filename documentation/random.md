@@ -138,3 +138,22 @@ without learning which generator it was given.
 
 `kernel_fill` must not keep unused kernel bytes for a later call. A `fork`
 would duplicate them into the child.
+
+## 6. What judges the Java sequences
+
+`make test` does not run a container. The words in the unit test are a
+record of a sequence, and a record can be copied from the implementation
+that is supposed to be under test.
+
+`make check-oracle` asks OpenJDK. The image is
+`localhost/ghoti-cutil-oracle-java:21.0.12`, built from
+`tools/oracle/containers/java/Containerfile`. The base is Debian 13 slim at
+the same digest the rest of the suite pins, and the JDK is
+`openjdk-21-jdk-headless=21.0.12.1+1-1~deb13u1`. `java-version` must report
+`openjdk 21.0.12`.
+
+`gcu_random_java` is judged by `java.util.Random.nextInt`.
+`gcu_random_splitmix64` is judged by `java.util.SplittableRandom.nextLong`.
+xoshiro256++ and PCG64 are not Java generators, so this oracle does not
+speak for them. `Random.nextLong` is not `gcu_random_u64` on the Java
+handle, and the oracle does not compare those two.

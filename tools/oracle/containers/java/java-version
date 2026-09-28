@@ -1,0 +1,17 @@
+#!/bin/sh
+# Print the pinned OpenJDK identity, or the real one and a failure.
+#
+# The quote has to close, or be a dot, right after 21.0.12. Otherwise
+# 21.0.120 would satisfy a prefix check.
+set -eu
+got=$(java -version 2>&1 | head -n 1)
+case $got in
+  'openjdk version "21.0.12"'*| \
+  'openjdk version "21.0.12.'*)
+    printf '%s\n' 'openjdk 21.0.12'
+    ;;
+  *)
+    printf '%s\n' "$got" >&2
+    exit 1
+    ;;
+esac

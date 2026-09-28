@@ -1,0 +1,22 @@
+# OpenJDK 21, the judge for java.util.Random and SplittableRandom.
+#
+# Built here, so the finished image has no digest to pin. Everything the build
+# reads is pinned instead: the Debian base by digest, the JDK by full apt
+# version. java-version is what a second build has to satisfy.
+# documentation/random.md.
+#
+# The apt pin stops resolving when the archive drops it. That failure is the
+# point: an unpinned `apt-get install openjdk-21-jdk-headless` would silently
+# move the oracle.
+FROM docker.io/library/debian:13-slim@sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc1635634368b878189e8221c
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+      openjdk-21-jdk-headless=21.0.12.1+1-1~deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY java-version /usr/local/bin/java-version
+RUN chmod 0755 /usr/local/bin/java-version

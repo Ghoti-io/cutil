@@ -1466,6 +1466,27 @@ coverage: ## Build instrumented, run the tests, and report line coverage
 	$(MAKE) --no-print-directory all > /dev/null; \
 	exit $$status
 
+.PHONY: oracle-build oracle-version check-oracle
+
+oracle-build: ## Build the OpenJDK oracle image from its pinned Containerfile
+	@printf "\n### Building the OpenJDK oracle image ###\n"
+	docker build -t localhost/ghoti-cutil-oracle-java:21.0.12 \
+		-f tools/oracle/containers/java/Containerfile \
+		tools/oracle/containers/java
+
+oracle-version: ## Print the OpenJDK the random oracle would use
+	@GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java -- true
+
+$(APP_DIR)/random-words: examples/random_words.c $(APP_DIR)/$(TARGET)
+	@printf "\n### Compiling the random oracle driver ###\n"
+	$(CC) -std=c17 -Wall -Wextra -Werror $(INCLUDE) -o $@ $< $(LDFLAGS) $(CUTILLIBRARY)
+
+check-oracle: ## Judge Java's Random and SplittableRandom against OpenJDK
+check-oracle: $(APP_DIR)/random-words
+	@LD_LIBRARY_PATH="$(APP_DIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
+		GHOTI_ORACLE_REQUIRED=1 python3 tools/oracle/oracle_run.py java -- \
+		python3 tools/oracle/random_diff.py $(APP_DIR)/random-words
+
 help: ## Display this help
 # Scan only this makefile. $(MAKEFILE_LIST) grows to include every generated
 # .d file once the project has been built, and grep prefixes each match with

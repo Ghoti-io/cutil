@@ -1,0 +1,12 @@
+# The oracle image, pinned.
+#
+# One line per reference, tab-separated: <name> <image> <version> <what it answers>.
+#
+# This image is built here, so the tag is not a digest of the finished image.
+# What is pinned is everything the build reads — the Debian base by digest,
+# the JDK by full apt version — and the run-time check is the guarantee.
+#
+# Building it:
+#   make oracle-build
+
+java	localhost/ghoti-cutil-oracle-java:21.0.12	openjdk 21.0.12	java.util.Random.nextInt and SplittableRandom.nextLong
