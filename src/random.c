@@ -468,3 +468,202 @@ GCU_Random * gcu_random_mt64(uint64_t seed) {
   }
   return r;
 }
+
+
+static uint64_t rotl64(uint64_t x, unsigned k) {
+  return (x << k) | (x >> (64u - k));
+}
+
+
+static uint64_t mix64(uint64_t z) {
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+
+typedef struct {
+  uint64_t lo;
+  uint64_t hi;
+} U128;
+
+
+static U128 u128_add(U128 a, U128 b) {
+  U128 r;
+  r.lo = a.lo + b.lo;
+  r.hi = a.hi + b.hi + (r.lo < a.lo ? 1u : 0u);
+  return r;
+}
+
+
+static U128 u128_mul(U128 a, U128 b) {
+  uint64_t lo;
+  uint64_t hi;
+  U128 r;
+  mul_wide(a.lo, b.lo, &lo, &hi);
+  r.lo = lo;
+  r.hi = hi;
+  mul_wide(a.lo, b.hi, &lo, &hi);
+  r.hi += lo;
+  mul_wide(a.hi, b.lo, &lo, &hi);
+  r.hi += lo;
+  return r;
+}
+
+
+static GCU_Random * adopt_pump(void * box, struct BytePump * pump, unsigned word_bytes, int (* produce)(void * inner, unsigned char * le), void * inner) {
+  GCU_Random_Engine engine;
+  GCU_Random * r;
+  pump->off = 0;
+  pump->len = 0;
+  pump->word_bytes = word_bytes;
+  pump->produce = produce;
+  pump->inner = inner;
+  engine.ctx = box;
+  engine.fill = byte_pump_fill;
+  engine.destroy = free_ctx;
+  r = gcu_random_from_engine(&engine);
+  if (r == NULL) {
+    gcu_free(box);
+  }
+  return r;
+}
+
+
+typedef struct {
+  struct BytePump pump;
+  uint64_t seed;
+} JavaBox;
+
+
+static int java_produce(void * inner, unsigned char * le) {
+  uint64_t * seed = inner;
+  *seed = (*seed * 0x5DEECE66DULL + 0xBULL) & ((1ULL << 48) - 1);
+  store_u32_le((uint32_t)(*seed >> 16), le);
+  return 0;
+}
+
+
+GCU_Random * gcu_random_java(uint64_t seed) {
+  JavaBox * box = gcu_malloc(sizeof *box);
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  box->seed = (seed ^ 0x5DEECE66DULL) & ((1ULL << 48) - 1);
+  return adopt_pump(box, &box->pump, 4, java_produce, &box->seed);
+}
+
+
+typedef struct {
+  struct BytePump pump;
+  uint64_t state;
+} SplitBox;
+
+
+static int splitmix_produce(void * inner, unsigned char * le) {
+  uint64_t * state = inner;
+  *state += 0x9E3779B97F4A7C15ULL;
+  store_u64_le(mix64(*state), le);
+  return 0;
+}
+
+
+GCU_Random * gcu_random_splitmix64(uint64_t seed) {
+  SplitBox * box = gcu_malloc(sizeof *box);
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  box->state = seed;
+  return adopt_pump(box, &box->pump, 8, splitmix_produce, &box->state);
+}
+
+
+typedef struct {
+  struct BytePump pump;
+  uint64_t s[4];
+} XoshiroBox;
+
+
+static int xoshiro_produce(void * inner, unsigned char * le) {
+  uint64_t * s = inner;
+  uint64_t result = rotl64(s[0] + s[3], 23) + s[0];
+  uint64_t t = s[1] << 17;
+  s[2] ^= s[0];
+  s[3] ^= s[1];
+  s[1] ^= s[2];
+  s[0] ^= s[3];
+  s[2] ^= t;
+  s[3] = rotl64(s[3], 45);
+  store_u64_le(result, le);
+  return 0;
+}
+
+
+GCU_Random * gcu_random_xoshiro256pp(uint64_t seed) {
+  XoshiroBox * box = gcu_malloc(sizeof *box);
+  unsigned i;
+  uint64_t sm;
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  sm = seed;
+  for (i = 0; i < 4; ++i) {
+    sm += 0x9E3779B97F4A7C15ULL;
+    box->s[i] = mix64(sm);
+  }
+  return adopt_pump(box, &box->pump, 8, xoshiro_produce, box->s);
+}
+
+
+typedef struct {
+  struct BytePump pump;
+  U128 state;
+  U128 inc;
+} PcgBox;
+
+
+static const U128 PCG_MULT = { 4865540595714422341ULL, 2549297995355413924ULL };
+
+
+static uint64_t pcg_output(U128 state) {
+  uint64_t mixed = state.hi ^ state.lo;
+  unsigned rot = (unsigned)(state.hi >> 58);
+  if (rot == 0) {
+    return mixed;
+  }
+  return (mixed >> rot) | (mixed << (64u - rot));
+}
+
+
+static uint64_t pcg_step(PcgBox * box) {
+  U128 old = box->state;
+  box->state = u128_add(u128_mul(old, PCG_MULT), box->inc);
+  return pcg_output(old);
+}
+
+
+static int pcg_produce(void * inner, unsigned char * le) {
+  store_u64_le(pcg_step(inner), le);
+  return 0;
+}
+
+
+GCU_Random * gcu_random_pcg64(uint64_t seed) {
+  PcgBox * box = gcu_malloc(sizeof *box);
+  U128 initstate;
+  if (box == NULL) {
+    return NULL;
+  }
+  memset(box, 0, sizeof *box);
+  box->inc.lo = 1;
+  box->inc.hi = 0;
+  (void)pcg_step(box);
+  initstate.lo = seed;
+  initstate.hi = 0;
+  box->state = u128_add(box->state, initstate);
+  (void)pcg_step(box);
+  return adopt_pump(box, &box->pump, 8, pcg_produce, box);
+}

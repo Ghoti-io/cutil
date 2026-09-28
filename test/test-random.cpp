@@ -191,6 +191,66 @@ TEST(Random, PlaceDoesNotUseTheHeap) {
   EXPECT_EQ(NULL, gcu_random_place(storage, 1, &engine));
 }
 
+static void ExpectU32(GCU_Random * r, const uint32_t * words, int count) {
+  for (int i = 0; i < count; ++i) {
+    uint32_t word = 0;
+    ASSERT_EQ(0, gcu_random_u32(r, &word));
+    EXPECT_EQ(words[i], word) << i;
+  }
+}
+
+static void ExpectU64(GCU_Random * r, const uint64_t * words, int count) {
+  for (int i = 0; i < count; ++i) {
+    uint64_t word = 0;
+    ASSERT_EQ(0, gcu_random_u64(r, &word));
+    EXPECT_EQ(words[i], word) << i;
+  }
+}
+
+TEST(Random, JavaMatchesNextInt) {
+  // java.util.Random(1).nextInt() is -1155869325, which is this bit pattern.
+  const uint32_t words[] = {
+    0xBB1AD573u, 0x19B89CD8u, 0x68FB0E6Fu, 0x684DF992u
+  };
+  GCU_Random * r = gcu_random_java(1);
+  ASSERT_NE(r, nullptr);
+  ExpectU32(r, words, 4);
+  gcu_random_free(r);
+}
+
+TEST(Random, SplitMix64) {
+  const uint64_t words[] = {
+    0xE220A8397B1DCDAFULL, 0x6E789E6AA1B965F4ULL,
+    0x06C45D188009454FULL, 0xF88BB8A8724C81ECULL
+  };
+  GCU_Random * r = gcu_random_splitmix64(0);
+  ASSERT_NE(r, nullptr);
+  ExpectU64(r, words, 4);
+  gcu_random_free(r);
+}
+
+TEST(Random, Xoshiro256pp) {
+  const uint64_t words[] = {
+    0xCFC5D07F6F03C29BULL, 0xBF424132963FE08DULL,
+    0x19A37D5757AAF520ULL, 0xBF08119F05CD56D6ULL
+  };
+  GCU_Random * r = gcu_random_xoshiro256pp(1);
+  ASSERT_NE(r, nullptr);
+  ExpectU64(r, words, 4);
+  gcu_random_free(r);
+}
+
+TEST(Random, Pcg64) {
+  const uint64_t words[] = {
+    0xABE1E0E53261800AULL, 0x71564BA1920863F1ULL,
+    0x06F710DFF5126DAFULL, 0xAF595B987D60EA49ULL
+  };
+  GCU_Random * r = gcu_random_pcg64(1);
+  ASSERT_NE(r, nullptr);
+  ExpectU64(r, words, 4);
+  gcu_random_free(r);
+}
+
 TEST(Random, TwoHandlesDoNotInterfere) {
   GCU_Random * a = gcu_random_mt64(1);
   GCU_Random * b = gcu_random_mt64(2);

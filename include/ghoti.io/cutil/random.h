@@ -275,6 +275,57 @@ GCU_API GCU_Random * gcu_random_mt32(uint32_t seed);
  */
 GCU_API GCU_Random * gcu_random_mt64(uint64_t seed);
 
+/**
+ * java.util.Random, the 48-bit linear congruential generator.
+ *
+ * The seed is mixed the way setSeed does:
+ * (seed ^ 0x5DEECE66D) & ((1 << 48) - 1). The native word is 32 bits, the
+ * top of the 48-bit state, which is nextInt(). gcu_random_u64() on this
+ * handle is two of those words, low word first, which is not nextLong().
+ *
+ * @param seed The same seed java.util.Random's constructor accepts.
+ * @return The handle, or NULL if allocation failed.
+ */
+GCU_API GCU_Random * gcu_random_java(uint64_t seed);
+
+/**
+ * SplitMix64, the generator behind java.util.SplittableRandom.nextLong.
+ *
+ * The seed is stored as the state. The first draw adds the golden-ratio
+ * constant, then mixes. It is also the function that expands one word into
+ * the four words of gcu_random_xoshiro256pp().
+ *
+ * @param seed The starting state, stored as itself.
+ * @return The handle, or NULL if allocation failed.
+ */
+GCU_API GCU_Random * gcu_random_splitmix64(uint64_t seed);
+
+/**
+ * xoshiro256++ (Blackman and Vigna).
+ *
+ * The recommended generator when a new stream has no sequence it must match.
+ * The seed is one word, expanded to four state words with SplitMix64. The
+ * all-zero state is not a valid xoshiro state; this expansion does not
+ * produce it. This is not xoshiro256**, which is what .NET's unseeded
+ * Random uses.
+ *
+ * @param seed Expanded with SplitMix64 into the four state words.
+ * @return The handle, or NULL if allocation failed.
+ */
+GCU_API GCU_Random * gcu_random_xoshiro256pp(uint64_t seed);
+
+/**
+ * PCG64 XSL-RR 128/64 (O'Neill), the output function of NumPy's PCG64.
+ *
+ * Seeded as the reference srandom(seed, 0): one stream, the increment fixed
+ * from a sequence of 0. This is not NumPy's SeedSequence and not
+ * numpy.random.default_rng.
+ *
+ * @param seed The 64-bit initstate. The stream selector is 0.
+ * @return The handle, or NULL if allocation failed.
+ */
+GCU_API GCU_Random * gcu_random_pcg64(uint64_t seed);
+
 #ifdef __cplusplus
 }
 #endif // __cplusplus
