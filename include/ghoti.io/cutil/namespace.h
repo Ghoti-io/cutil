@@ -285,6 +285,8 @@
 #define gcu_random_f64 GHOTIIO_CUTIL(gcu_random_f64)
 #define gcu_random_free GHOTIIO_CUTIL(gcu_random_free)
 #define gcu_random_from_engine GHOTIIO_CUTIL(gcu_random_from_engine)
+#define gcu_random_handle_size GHOTIIO_CUTIL(gcu_random_handle_size)
+#define gcu_random_place GHOTIIO_CUTIL(gcu_random_place)
 #define gcu_random_mt32 GHOTIIO_CUTIL(gcu_random_mt32)
 #define gcu_random_mt32_init GHOTIIO_CUTIL(gcu_random_mt32_init)
 #define gcu_random_mt32_next GHOTIIO_CUTIL(gcu_random_mt32_next)

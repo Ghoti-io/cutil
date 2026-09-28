@@ -168,6 +168,29 @@ typedef struct GCU_Random_Engine {
 GCU_API GCU_Random * gcu_random_from_engine(const GCU_Random_Engine * engine);
 
 /**
+ * How many bytes gcu_random_place() needs.
+ *
+ * The bytes must be aligned for a pointer.
+ */
+GCU_API size_t gcu_random_handle_size(void);
+
+/**
+ * Build a handle in storage the caller owns.
+ *
+ * Use this for a generator that lives for the process and must not come from
+ * the heap. gcu_random_free() still runs destroy, and it does not free the
+ * storage. storage_size must be at least gcu_random_handle_size(), and
+ * storage must be aligned for a pointer.
+ *
+ * @param storage Caller-owned bytes.
+ * @param storage_size The number of bytes at storage.
+ * @param engine The engine to copy. The fill pointer is required.
+ * @return The handle, or NULL if the arguments cannot hold one. The caller
+ * still owns engine->ctx when this returns NULL.
+ */
+GCU_API GCU_Random * gcu_random_place(void * storage, size_t storage_size, const GCU_Random_Engine * engine);
+
+/**
  * Release a handle and, when the engine has one, call its destroy.
  *
  * @param r The handle. NULL does nothing.

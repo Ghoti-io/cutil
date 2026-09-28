@@ -22,6 +22,7 @@
 #include <ghoti.io/cutil/macros.h>
 #include <ghoti.io/cutil/memory.h>
 #include <ghoti.io/cutil/random.h>
+#include <stdint.h>
 #include <string.h>
 
 // For reference, see the Mersenne Twister pseudocode from Wikipedia:
@@ -144,6 +145,7 @@ uint64_t gcu_random_mt64_next(GCU_Random_MT64_State * state) {
 
 struct GCU_Random {
   GCU_Random_Engine engine;
+  int owned;
 };
 
 
@@ -270,6 +272,30 @@ GCU_Random * gcu_random_from_engine(const GCU_Random_Engine * engine) {
     return NULL;
   }
   r->engine = *engine;
+  r->owned = 1;
+  return r;
+}
+
+
+size_t gcu_random_handle_size(void) {
+  return sizeof(struct GCU_Random);
+}
+
+
+GCU_Random * gcu_random_place(void * storage, size_t storage_size, const GCU_Random_Engine * engine) {
+  GCU_Random * r;
+  if (storage == NULL || engine == NULL || engine->fill == NULL) {
+    return NULL;
+  }
+  if (storage_size < sizeof *r) {
+    return NULL;
+  }
+  if (((uintptr_t)storage % _Alignof(GCU_Random)) != 0) {
+    return NULL;
+  }
+  r = storage;
+  r->engine = *engine;
+  r->owned = 0;
   return r;
 }
 
@@ -281,7 +307,9 @@ void gcu_random_free(GCU_Random * r) {
   if (r->engine.destroy != NULL) {
     r->engine.destroy(r->engine.ctx);
   }
-  gcu_free(r);
+  if (r->owned) {
+    gcu_free(r);
+  }
 }
 
 

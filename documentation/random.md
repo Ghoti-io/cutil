@@ -40,6 +40,10 @@ There is no `create` field. Construction happens in the function that knows
 the algorithm, before CUtil sees the struct. That function allocates
 whatever state it wants, fills in the engine, and returns the handle from
 `gcu_random_from_engine()`. CUtil copies the three fields into the handle.
+A generator that lives for the whole process, and must not come from the
+heap, uses `gcu_random_place()` on storage the caller owns;
+`gcu_random_handle_size()` is how much, aligned for a pointer.
+`gcu_random_free()` still runs `destroy`, and it does not free that storage.
 The function pointers must outlive the handle; they are static functions,
 not something allocated beside the state. The caller does not free `ctx`
 itself after a successful `gcu_random_from_engine()`: the handle owns it,

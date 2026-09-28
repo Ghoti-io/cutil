@@ -3,6 +3,7 @@
 #include <random>
 #include <sstream>
 #include <gtest/gtest.h>
+#include <ghoti.io/cutil/memory.h>
 #include <ghoti.io/cutil/random.h>
 
 using namespace std;
@@ -172,6 +173,22 @@ TEST(Random, FailureWipesAndDestroyRuns) {
   EXPECT_EQ(NULL, gcu_random_from_engine(NULL));
   GCU_Random_Engine no_fill = { NULL, NULL, NULL };
   EXPECT_EQ(NULL, gcu_random_from_engine(&no_fill));
+}
+
+TEST(Random, PlaceDoesNotUseTheHeap) {
+  alignas(void *) unsigned char storage[64];
+  ASSERT_GE(sizeof storage, gcu_random_handle_size());
+  size_t allocs = gcu_get_alloc_count();
+  size_t frees = gcu_get_free_count();
+  destroyed = 0;
+  GCU_Random_Engine engine = { NULL, fail_fill, mark_destroyed };
+  GCU_Random * r = gcu_random_place(storage, sizeof storage, &engine);
+  ASSERT_NE(r, nullptr);
+  EXPECT_EQ(allocs, gcu_get_alloc_count());
+  gcu_random_free(r);
+  EXPECT_EQ(1, destroyed);
+  EXPECT_EQ(frees, gcu_get_free_count());
+  EXPECT_EQ(NULL, gcu_random_place(storage, 1, &engine));
 }
 
 TEST(Random, TwoHandlesDoNotInterfere) {
