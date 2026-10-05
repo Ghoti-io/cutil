@@ -155,7 +155,7 @@ typedef struct {
   /**
    * Directory to run in, UTF-8, or NULL to inherit this process's.
    *
-   * A directory that cannot be entered is a @ref GCU_SUBPROCESS_NOT_STARTED,
+   * A directory that cannot be entered is a `GCU_SUBPROCESS_NOT_STARTED`,
    * not a child that runs somewhere unexpected.
    */
   const char * directory;
@@ -179,8 +179,8 @@ typedef struct {
 
   /**
    * Give the child one stream instead of two: its standard error arrives in
-   * @ref GCU_Subprocess_Result::out, interleaved with its standard output as
-   * a terminal would show it, and @ref GCU_Subprocess_Result::err stays
+   * `GCU_Subprocess_Result::out`, interleaved with its standard output as
+   * a terminal would show it, and `GCU_Subprocess_Result::err` stays
    * empty.
    *
    * Interleaved by arrival, which is the child's flushing order and not
@@ -224,10 +224,10 @@ typedef struct {
   GCU_Subprocess_Outcome outcome;
 
   /// What the program passed to `exit()`.  Meaningful only for
-  /// @ref GCU_SUBPROCESS_EXITED.
+  /// `GCU_SUBPROCESS_EXITED`.
   int exit_code;
 
-  /// The signal that killed it, for @ref GCU_SUBPROCESS_SIGNALED, and also
+  /// The signal that killed it, for `GCU_SUBPROCESS_SIGNALED`, and also
   /// for the two outcomes where this library did the killing -- the outcome,
   /// not this, is what says whose decision it was.  0 otherwise.
   int signal;
@@ -241,7 +241,7 @@ typedef struct {
   size_t out_size;
 
   /// Captured standard error, on the same terms as @p out.  Always empty
-  /// when @ref GCU_Subprocess_Options::merge_stderr was set.
+  /// when `GCU_Subprocess_Options::merge_stderr` was set.
   char * err;
 
   /// Bytes in @p err, not counting the terminator.
@@ -253,13 +253,13 @@ typedef struct {
  *
  * Success means the program ran, whatever it then did: a child that exits 1,
  * or crashes, or is killed for taking too long, is a run that happened and
- * returns 0. Read @ref GCU_Subprocess_Result::outcome to find out which.
+ * returns 0. Read `GCU_Subprocess_Result::out`come to find out which.
  *
  * @param options What to run.  See @ref GCU_Subprocess_Options.
  * @param result Receives the outcome and the captured output.  Overwritten
  *   whatever the call returns, so a previous result must be freed first.
  *   Free it with gcu_subprocess_result_free() when the return is 0.
- * @return 0 if the program ran, @ref GCU_SUBPROCESS_NOT_STARTED if it could
+ * @return 0 if the program ran, `GCU_SUBPROCESS_NOT_STARTED` if it could
  *   not be started, -1 if this call failed before getting that far.
  */
 GCU_API int gcu_subprocess_run(const GCU_Subprocess_Options * options,
