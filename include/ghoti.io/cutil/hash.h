@@ -47,7 +47,7 @@ typedef struct GCU_Hash8 GCU_Hash8;
  * Pointer to a function which will be called when the hash table destroy
  * function is called.
  *
- * @ref gcu_hash64_destroy
+ * `gcu_hash64_destroy()`
  *
  * @param hash table The hash table which is about to be destroyed.
  */
@@ -57,7 +57,7 @@ typedef void (* GCU_Hash64_Cleanup)(GCU_Hash64 * hashTable);
  * Pointer to a function which will be called when the hash table destroy
  * function is called.
  *
- * @ref gcu_hash32_destroy
+ * `gcu_hash32_destroy()`
  *
  * @param hash table The hash table which is about to be destroyed.
  */
@@ -67,7 +67,7 @@ typedef void (* GCU_Hash32_Cleanup)(GCU_Hash32 * hashTable);
  * Pointer to a function which will be called when the hash table destroy
  * function is called.
  *
- * @ref gcu_hash16_destroy
+ * `gcu_hash16_destroy()`
  *
  * @param hash table The hash table which is about to be destroyed.
  */
@@ -77,7 +77,7 @@ typedef void (* GCU_Hash16_Cleanup)(GCU_Hash16 * hashTable);
  * Pointer to a function which will be called when the hash table destroy
  * function is called.
  *
- * @ref gcu_hash8_destroy
+ * `gcu_hash8_destroy()`
  *
  * @param hash table The hash table which is about to be destroyed.
  */

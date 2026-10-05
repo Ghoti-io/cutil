@@ -46,7 +46,7 @@ typedef struct GCU_Vector8 GCU_Vector8;
  * Pointer to a function which will be called when the vector destroy function
  * is called.
  *
- * @ref gcu_vector64_destroy
+ * `gcu_vector64_destroy()`
  *
  * @param vector The vector which is about to be destroyed.
  */
@@ -56,7 +56,7 @@ typedef void (* GCU_Vector64_Cleanup)(GCU_Vector64 * vector);
  * Pointer to a function which will be called when the vector destroy function
  * is called.
  *
- * @ref gcu_vector32_destroy
+ * `gcu_vector32_destroy()`
  *
  * @param vector The vector which is about to be destroyed.
  */
@@ -66,7 +66,7 @@ typedef void (* GCU_Vector32_Cleanup)(GCU_Vector32 * vector);
  * Pointer to a function which will be called when the vector destroy function
  * is called.
  *
- * @ref gcu_vector16_destroy
+ * `gcu_vector16_destroy()`
  *
  * @param vector The vector which is about to be destroyed.
  */
@@ -76,7 +76,7 @@ typedef void (* GCU_Vector16_Cleanup)(GCU_Vector16 * vector);
  * Pointer to a function which will be called when the vector destroy function
  * is called.
  *
- * @ref gcu_vector8_destroy
+ * `gcu_vector8_destroy()`
  *
  * @param vector The vector which is about to be destroyed.
  */

@@ -48,14 +48,14 @@
  * until someone reads it. So a parent that drains stdout to the end and only
  * then looks at stderr will hang forever against a child that fills stderr
  * first, and will pass every test written with a small fixture. This reads
- * from both as they fill, and writes @ref GCU_Subprocess_Options::input at
+ * from both as they fill, and writes `GCU_Subprocess_Options::input` at
  * the same time, so no ordering of the child's writes can deadlock it.
  *
  * ## The output is collected in memory
  *
  * All of it, before the call returns. That is the price of the simple shape.
  * For a child whose output is unbounded -- or merely large enough to matter
- * -- set @ref GCU_Subprocess_Options::output_limit, which stops the run
+ * -- set `GCU_Subprocess_Options::output_limit`, which stops the run
  * rather than the machine.
  *
  * ## The child gets three descriptors and no others
@@ -72,8 +72,8 @@
  *
  * ## Only the child is killed
  *
- * @ref GCU_Subprocess_Options::timeout and
- * @ref GCU_Subprocess_Options::output_limit both end a run by killing the
+ * `GCU_Subprocess_Options::timeout` and
+ * `GCU_Subprocess_Options::output_limit` both end a run by killing the
  * process that was started -- not anything it started. A child that forks and
  * exits leaves its own children running, and this cannot see them. Where that
  * matters, the child needs to be something that cleans up after itself.
@@ -105,7 +105,7 @@ extern "C" {
  * Why the program could not be run is left in the platform's error slot, so
  * `gcu_error_string_last()` describes it -- `ENOENT` for a name that is not
  * on `PATH`, `EACCES` for a file that is not executable, and whatever
- * @ref GCU_Subprocess_Options::directory failed with.
+ * `GCU_Subprocess_Options::directory` failed with.
  */
 #define GCU_SUBPROCESS_NOT_STARTED (-2)
 
@@ -116,15 +116,15 @@ extern "C" {
  * and three booleans can be made to disagree.
  */
 typedef enum {
-  /// The program ran to completion.  @ref GCU_Subprocess_Result::exit_code
+  /// The program ran to completion.  `GCU_Subprocess_Result::exit_code`
   /// is what it passed to `exit()`.
   GCU_SUBPROCESS_EXITED = 0,
-  /// A signal killed it.  @ref GCU_Subprocess_Result::signal says which.
+  /// A signal killed it.  `GCU_Subprocess_Result::signal` says which.
   /// POSIX only; a Windows process has no equivalent and never reports this.
   GCU_SUBPROCESS_SIGNALED,
-  /// @ref GCU_Subprocess_Options::timeout elapsed and this killed the child.
+  /// `GCU_Subprocess_Options::timeout` elapsed and this killed the child.
   GCU_SUBPROCESS_TIMED_OUT,
-  /// @ref GCU_Subprocess_Options::output_limit was reached and this killed
+  /// `GCU_Subprocess_Options::output_limit` was reached and this killed
   /// the child.  The output collected so far is kept.
   GCU_SUBPROCESS_OUTPUT_LIMIT,
 } GCU_Subprocess_Outcome;
