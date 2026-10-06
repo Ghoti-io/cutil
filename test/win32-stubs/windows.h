@@ -244,3 +244,27 @@ LONG InterlockedExchangeAdd(LONG volatile * Addend, LONG Value);
 LONG InterlockedExchange(LONG volatile * Target, LONG Value);
 BOOL CancelSynchronousIo(HANDLE hThread);
 #endif
+
+/* --- appended for fiber.h / fiber.c --- */
+#ifndef GHOTI_IO_GCU_WIN32_STUBS_FIBER
+#define GHOTI_IO_GCU_WIN32_STUBS_FIBER
+
+typedef void VOID;
+typedef void * LPVOID;
+
+#define WINAPI
+#define ERROR_ALREADY_FIBER 1280UL
+#define FIBER_FLAG_FLOAT_SWITCH 0x1UL
+
+typedef VOID (WINAPI * LPFIBER_START_ROUTINE)(LPVOID lpFiberParameter);
+
+LPVOID CreateFiberEx(unsigned long long dwStackCommitSize,
+    unsigned long long dwStackReserveSize, DWORD dwFlags,
+    LPFIBER_START_ROUTINE lpStartAddress, LPVOID lpParameter);
+LPVOID ConvertThreadToFiberEx(LPVOID lpParameter, DWORD dwFlags);
+LPVOID GetCurrentFiber(void);
+VOID SwitchToFiber(LPVOID lpFiber);
+VOID DeleteFiber(LPVOID lpFiber);
+DWORD GetCurrentThreadId(void);
+
+#endif

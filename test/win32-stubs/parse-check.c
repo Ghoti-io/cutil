@@ -21,6 +21,12 @@
 #include <ghoti.io/cutil/atomic.h>
 #include <ghoti.io/cutil/subprocess.h>
 #include <ghoti.io/cutil/barrier.h>
+#include <ghoti.io/cutil/fiber.h>
+
+static void fiber_entry(void * arg) {
+  (void)arg;
+  gcu_fiber_yield();
+}
 
 int main(void) {
   GCU_MUTEX_T m;
@@ -110,6 +116,20 @@ int main(void) {
   rc |= gcu_barrier_wait(&gate);
   rc |= gcu_barrier_destroy(&gate);
   rc |= GCU_BARRIER_SERIAL;
+
+  // fiber.h's Windows branch is only the support macro and the shared
+  // declarations; the Fiber API calls are in src/fiber.c, which the
+  // check-win32-parse rule compiles separately against these stubs.
+  GCU_Fiber * fiber = 0;
+  rc |= GCU_FIBER_SUPPORTED ? 0 : 1;
+  rc |= (int)gcu_fiber_create(&fiber, fiber_entry, 0,
+    GCU_FIBER_DEFAULT_STACK_SIZE, 0);
+  rc |= (int)gcu_fiber_switch_to(fiber);
+  rc |= (int)gcu_fiber_yield();
+  rc |= gcu_fiber_current() ? 1 : 0;
+  rc |= gcu_fiber_is_finished(fiber) ? 1 : 0;
+  rc |= (int)gcu_fiber_destroy(fiber);
+  rc |= gcu_fiber_result_string(GCU_FIBER_ERR_THREAD) ? 0 : 1;
 
   return rc;
 }

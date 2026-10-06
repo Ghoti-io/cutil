@@ -90,7 +90,10 @@ which is what the hash tables expect as a key hash.
 is a fixed set of worker threads. `sequencer.h` is a reorder buffer: work
 finishes in any order and comes back out in the order it was submitted. The
 pool decides when work runs; the sequencer decides the order results are
-seen in.
+seen in. `fiber.h` is stackful coroutines: a function on a stack of its own
+(guard page below it) that can yield in the middle of a call and be resumed
+later, with its own rounding mode, pinned to the thread that made it. It is
+the mechanism only; which fiber runs next is the caller's policy.
 
 **Files.** `file.h` reads a whole file, replaces one atomically, and offers a
 thin handle for files too large to hold. `dir.h` creates, removes and walks
@@ -118,6 +121,7 @@ The long arguments live next to the modules they belong to:
 | [documentation/path.md](documentation/path.md) | Lexical paths and the environment |
 | [documentation/thread-pool.md](documentation/thread-pool.md) | The worker pool |
 | [documentation/sequencer.md](documentation/sequencer.md) | The reorder buffer |
+| [documentation/fiber.md](documentation/fiber.md) | Fibers: the switch, guard pages, sanitizer annotations |
 | [documentation/random.md](documentation/random.md) | The random engine and the seeded algorithms |
 
 `make docs` builds the manual from the headers.

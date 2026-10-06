@@ -349,6 +349,7 @@ LIBOBJECTS := \
 	$(OBJ_DIR)/dir.o \
 	$(OBJ_DIR)/error.o \
 	$(OBJ_DIR)/env.o \
+	$(OBJ_DIR)/fiber.o \
 	$(OBJ_DIR)/file.o \
 	$(OBJ_DIR)/filelock.o \
 	$(OBJ_DIR)/hash.o \
@@ -377,7 +378,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps
+TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps check-fiber-defects
 
 # Used by check-clang. Empty when clang is not installed, which that
 # target reports rather than failing over.
@@ -386,7 +387,7 @@ CLANG := $(shell command -v clang 2>/dev/null)
 # Sources whose #ifdef _WIN32 bodies are parse-checked. Add a file here in
 # the same commit that gives it a Windows branch, or the branch ships
 # untokenised.
-WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c
+WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c src/fiber.c
 
 
 
@@ -399,7 +400,7 @@ all: $(APP_DIR)/$(TARGET) ## Build the shared library
 # Dependency Inclusion
 ####################################################################
 # Compiler-generated .d files (see -MMD -MP -MF in compile commands).
-TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-path test-file test-dir
+TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-fiber test-path test-file test-dir
 TEST_BINARIES := $(foreach t,$(TEST_NAMES),$(APP_DIR)/$(t)$(EXE_EXTENSION))
 TEST_DEPFILES := $(addprefix $(APP_DIR)/,$(TEST_NAMES:%=%.d))
 DEPFILES := $(LIBOBJECTS:.o=.d) $(TEST_DEPFILES)
@@ -710,6 +711,11 @@ $(APP_DIR)/test-sequencer$(EXE_EXTENSION): test/test-sequencer.cpp $(FLAGS_STAMP
 	@printf "\n### Compiling Sequencer Test ###\n"
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-sequencer.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
+
+$(APP_DIR)/test-fiber$(EXE_EXTENSION): test/test-fiber.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
+	@printf "\n### Compiling Fiber Test ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-fiber.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
 
 $(APP_DIR)/test-file$(EXE_EXTENSION): test/test-file.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Compiling File Test ###\n"
@@ -1187,6 +1193,17 @@ ifeq ($(OS_NAME), Linux)
 			UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
 			$$t --gtest_brief=1 || exit 1; \
 	done
+# The fibers again with use-after-return detection off.  In the default mode
+# a frame's locals live on a heap-backed fake stack, so the real fiber stack
+# is never poisoned and the switch annotations are exercised through the fake
+# stack only.  With it off, the poison sits on the real stack, which is where
+# a switch that did not announce the new stack leaves it behind.  Each mode
+# reaches code the other cannot.
+	@printf "\n--- $(ASAN_APP_DIR)/test-fiber (detect_stack_use_after_return=0) ---\n"
+	@env LD_LIBRARY_PATH="$(ASAN_APP_DIR)" LD_PRELOAD="$(ASAN_RUNTIME)" \
+		ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=0 \
+		UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+		$(ASAN_APP_DIR)/test-fiber --gtest_brief=1
 	@printf "\033[0;32m\nAll tests passed with ASan + UBSan.\033[0m\n"
 else
 	@printf "\033[0;31mSanitizer builds are currently only supported on Linux.\033[0m\n"
@@ -1216,7 +1233,7 @@ test-ubsan: test-asan
 # that is here to watch the synchronisation primitives themselves. Add a name
 # here once its test is expected to be clean under TSan.
 
-TSAN_TEST_NAMES := test-mutex test-cond test-barrier test-once test-rwlock test-tls test-atomic test-semaphore test-thread test-pool test-sequencer
+TSAN_TEST_NAMES := test-mutex test-cond test-barrier test-once test-rwlock test-tls test-atomic test-semaphore test-thread test-pool test-sequencer test-fiber
 
 TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g $(SAN_OPT_CFLAGS)
 
@@ -1309,6 +1326,163 @@ else
 	@exit 1
 endif
 
+
+# ---------------------------------------------------------------------------
+# The fiber gate, and the defects it plants
+#
+# The fiber tests are only worth running if they are known to fail when the
+# switch is wrong, and the sanitizers only see through a fiber library that
+# tells them about each switch.  So this builds the library several more
+# times, each with one deliberate defect compiled into src/fiber.c (the
+# GCU_FIBER_PLANT_* macros, which no ordinary build defines), runs the fiber
+# tests against it, and requires them to report:
+#
+#   plain tree     the switch skips the MXCSR control bits (x86-64), or the
+#                  x87 control word (x86-64), or FPCR (arm64): the rounding
+#                  test must fail.
+#   ASan tree      the switch does not tell AddressSanitizer about the new
+#                  stack: it must report.  Run with
+#                  detect_stack_use_after_return=0, because in the default
+#                  mode locals live on a heap-backed fake stack and the real
+#                  stack never holds the stale poison the defect leaves
+#                  behind; there the unannotated switch only prints a warning,
+#                  which the second arm requires.
+#   TSan tree      the switch does not tell ThreadSanitizer about the new
+#                  fiber: the test that asks which TSan context is running
+#                  must fail.
+#
+# Each arm also runs the real library first and requires it to be quiet, so a
+# gate that fails for some other reason cannot pass as having caught the
+# defect.  test/check-fiber-defects.sh is the arm; this is the building.
+#
+# The rules are one per tree and spell the tree's own stamp, because
+# test/stamp-audit.awk reads the target's name to decide which stamp a rule
+# owes.  A planted library lives in a directory of its own beside the real one
+# and is found by the test binary through LD_LIBRARY_PATH, which beats the
+# RUNPATH the binary carries.
+# ---------------------------------------------------------------------------
+
+# What the library is being built FOR, not what is running make: a cross build
+# with CC=aarch64-linux-gnu-gcc on an x86-64 host needs the arm64 defects (and
+# cannot run them, which is a different matter -- see below).  Each entry is
+# name:MACRO:substring of the test that must fail.
+FIBER_TARGET := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifneq ($(findstring aarch64,$(FIBER_TARGET)),)
+FIBER_GATE_SUPPORTED := yes
+FIBER_FP_PLANTS := no-fpcr:NO_FPCR:EachFiberKeepsItsOwnRoundingMode \
+	no-callee-saved:NO_CALLEE_SAVED:CalleeSavedRegistersSurvive
+else ifneq ($(findstring x86_64,$(FIBER_TARGET)),)
+FIBER_GATE_SUPPORTED := yes
+FIBER_FP_PLANTS := no-mxcsr:NO_MXCSR:EachFiberKeepsItsOwnRoundingMode \
+	no-x87cw:NO_X87CW:EachFiberKeepsItsOwnRoundingMode \
+	no-callee-saved:NO_CALLEE_SAVED:CalleeSavedRegistersSurvive
+else
+# i686, s390x, powerpc, sparc: no switch routine, the tests skip, and a gate
+# that runs skipped tests proves nothing.  The gate says so and stops.
+FIBER_GATE_SUPPORTED := no
+FIBER_FP_PLANTS :=
+endif
+
+define FIBER_PLANT_RULE
+$(APP_DIR)/plant-fiber-$(1)/fiber.o: src/fiber.c $(FLAGS_STAMP) \
+		| $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h \
+		  $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
+	@printf "\n### Compiling fiber.c with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(CFLAGS) -DGCU_FIBER_PLANT_$(2) $$(INCLUDE) -c $$< -o $$@ $$(OS_SPECIFIC_COMPILE_FLAGS)
+
+$(APP_DIR)/plant-fiber-$(1)/$(TARGET): $(APP_DIR)/plant-fiber-$(1)/fiber.o \
+		$(filter-out $(OBJ_DIR)/fiber.o,$(LIBOBJECTS)) $(FLAGS_STAMP)
+	@printf "\n### Linking a library with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(CFLAGS) $$(OS_SPECIFIC_LINK_FLAGS) -o $$@ $(APP_DIR)/plant-fiber-$(1)/fiber.o $(filter-out $(OBJ_DIR)/fiber.o,$(LIBOBJECTS)) $$(LDFLAGS) $$(OS_SPECIFIC_LIBRARY_NAME_FLAG)
+	@ln -f -s $(TARGET) $(APP_DIR)/plant-fiber-$(1)/$(SO_NAME)
+	@ln -f -s $(SO_NAME) $(APP_DIR)/plant-fiber-$(1)/$(BASE_NAME)
+endef
+$(foreach p,$(FIBER_FP_PLANTS),$(eval $(call FIBER_PLANT_RULE,$(word 1,$(subst :, ,$(p))),$(word 2,$(subst :, ,$(p))))))
+
+define ASAN_FIBER_PLANT_RULE
+$(ASAN_APP_DIR)/plant-fiber-$(1)/fiber.o: src/fiber.c $(ASAN_FLAGS_STAMP) \
+		| $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h \
+		  $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
+	@printf "\n### Compiling (ASan+UBSan) fiber.c with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(ASAN_CFLAGS) -DGCU_FIBER_PLANT_$(2) $$(INCLUDE) -c $$< -o $$@ $$(OS_SPECIFIC_COMPILE_FLAGS)
+
+$(ASAN_APP_DIR)/plant-fiber-$(1)/$(ASAN_TARGET): $(ASAN_APP_DIR)/plant-fiber-$(1)/fiber.o \
+		$(filter-out $(ASAN_OBJ_DIR)/fiber.o,$(ASAN_LIBOBJECTS)) $(ASAN_FLAGS_STAMP)
+	@printf "\n### Linking (ASan+UBSan) a library with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(ASAN_CFLAGS) $$(OS_SPECIFIC_LINK_FLAGS) -o $$@ $(ASAN_APP_DIR)/plant-fiber-$(1)/fiber.o $(filter-out $(ASAN_OBJ_DIR)/fiber.o,$(ASAN_LIBOBJECTS)) $$(ASAN_LDFLAGS)
+endef
+$(eval $(call ASAN_FIBER_PLANT_RULE,no-asan,NO_ASAN))
+
+define TSAN_FIBER_PLANT_RULE
+$(TSAN_APP_DIR)/plant-fiber-$(1)/fiber.o: src/fiber.c $(TSAN_FLAGS_STAMP) \
+		| $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h \
+		  $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
+	@printf "\n### Compiling (TSan) fiber.c with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(TSAN_CFLAGS) -DGCU_FIBER_PLANT_$(2) $$(INCLUDE) -c $$< -o $$@ $$(OS_SPECIFIC_COMPILE_FLAGS)
+
+$(TSAN_APP_DIR)/plant-fiber-$(1)/$(TSAN_TARGET): $(TSAN_APP_DIR)/plant-fiber-$(1)/fiber.o \
+		$(filter-out $(TSAN_OBJ_DIR)/fiber.o,$(TSAN_LIBOBJECTS)) $(TSAN_FLAGS_STAMP)
+	@printf "\n### Linking (TSan) a library with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(TSAN_CFLAGS) $$(OS_SPECIFIC_LINK_FLAGS) -o $$@ $(TSAN_APP_DIR)/plant-fiber-$(1)/fiber.o $(filter-out $(TSAN_OBJ_DIR)/fiber.o,$(TSAN_LIBOBJECTS)) $$(TSAN_LDFLAGS)
+endef
+$(eval $(call TSAN_FIBER_PLANT_RULE,no-tsan,NO_TSAN))
+
+FIBER_PLANT_LIBS := $(foreach p,$(FIBER_FP_PLANTS),$(APP_DIR)/plant-fiber-$(word 1,$(subst :, ,$(p)))/$(TARGET))
+
+.PHONY: check-fiber-defects
+check-fiber-defects: ## Plant each way the fibers can be wrong and require the tests to notice
+ifeq ($(OS_NAME)$(FIBER_GATE_SUPPORTED), Linuxyes)
+check-fiber-defects: $(APP_DIR)/$(TARGET) $(APP_DIR)/test-fiber$(EXE_EXTENSION) $(FIBER_PLANT_LIBS) \
+		$(ASAN_APP_DIR)/$(ASAN_TARGET) $(ASAN_APP_DIR)/test-fiber$(EXE_EXTENSION) \
+		$(ASAN_APP_DIR)/plant-fiber-no-asan/$(ASAN_TARGET) \
+		$(TSAN_APP_DIR)/$(TSAN_TARGET) $(TSAN_APP_DIR)/test-fiber$(EXE_EXTENSION) \
+		$(TSAN_APP_DIR)/plant-fiber-no-tsan/$(TSAN_TARGET)
+endif
+check-fiber-defects:
+	@printf "\n### Planting each fiber defect; the tests must report it ###\n"
+ifneq ($(OS_NAME), Linux)
+	@printf "check-fiber-defects: SKIPPED (Linux only); nothing was checked\n"
+else ifneq ($(FIBER_GATE_SUPPORTED), yes)
+	@printf "check-fiber-defects: SKIPPED (no fiber switch for target '$(FIBER_TARGET)', so the tests skip); nothing was checked\n"
+else
+	@set -e; \
+	for p in $(FIBER_FP_PLANTS); do \
+		oldifs=$$IFS; IFS=:; set -- $$p; IFS=$$oldifs; \
+		sh test/check-fiber-defects.sh "$$1 (switch)" \
+			$(APP_DIR)/test-fiber "$(APP_DIR)" "$(APP_DIR)/plant-fiber-$$1" \
+			"FAILED +\\] Fiber\\.$$3" \
+			LD_PRELOAD=; \
+	done; \
+	if [ -n "$(ASAN_RUNTIME)" ]; then \
+		sh test/check-fiber-defects.sh "no-asan (no annotation, real stack)" \
+			$(ASAN_APP_DIR)/test-fiber "$(ASAN_APP_DIR)" \
+			"$(ASAN_APP_DIR)/plant-fiber-no-asan" \
+			'ERROR: AddressSanitizer' \
+			LD_PRELOAD="$(ASAN_RUNTIME)" \
+			ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=0; \
+		GCU_GATE_MAY_EXIT_ZERO=1 sh test/check-fiber-defects.sh \
+			"no-asan (no annotation, default options)" \
+			$(ASAN_APP_DIR)/test-fiber "$(ASAN_APP_DIR)" \
+			"$(ASAN_APP_DIR)/plant-fiber-no-asan" \
+			'ASan is ignoring requested __asan_handle_no_return' \
+			LD_PRELOAD="$(ASAN_RUNTIME)" \
+			ASAN_OPTIONS=detect_leaks=1:halt_on_error=1; \
+	else \
+		printf "  ASan arms SKIPPED: no ASan runtime to preload (CC is not gcc); nothing was checked there\n"; \
+	fi; \
+	sh test/check-fiber-defects.sh "no-tsan (no annotation)" \
+		$(TSAN_APP_DIR)/test-fiber "$(TSAN_APP_DIR)" \
+		"$(TSAN_APP_DIR)/plant-fiber-no-tsan" \
+		'FAILED +\] Fiber\.EachFiberRunsAsItsOwnContextToThreadSanitizer' \
+		LD_PRELOAD= TSAN_OPTIONS=halt_on_error=1; \
+	printf "\033[0;32mEvery planted fiber defect that could be run was caught.\033[0m\n"
+endif
 
 clean: ## Remove all contents of the build directories.
 # The sanitizer tree is removed too. It is a sibling of the ordinary build
