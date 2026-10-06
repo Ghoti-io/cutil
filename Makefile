@@ -274,9 +274,10 @@ endif
 ifeq ($(OS_NAME), Windows)
 # path.c asks GetUserProfileDirectoryW (userenv) for the home directory when
 # USERPROFILE is not set, and temporary names come from BCryptGenRandom
-# (bcrypt).
+# (bcrypt).  socket.c and loop.c are Winsock (ws2_32), and loop.c's AcceptEx
+# lives in mswsock.
 # Placed after the OS block because OS_NAME is not known before it.
-LDFLAGS += -luserenv -lbcrypt
+LDFLAGS += -luserenv -lbcrypt -lws2_32 -lmswsock
 endif
 
 # ---------------------------------------------------------------------------
@@ -354,6 +355,7 @@ LIBOBJECTS := \
 	$(OBJ_DIR)/filelock.o \
 	$(OBJ_DIR)/hash.o \
 	$(OBJ_DIR)/library.o \
+	$(OBJ_DIR)/loop.o \
 	$(OBJ_DIR)/memory.o \
 	$(OBJ_DIR)/mmap.o \
 	$(OBJ_DIR)/once.o \
@@ -363,6 +365,7 @@ LIBOBJECTS := \
 	$(OBJ_DIR)/rwlock.o \
 	$(OBJ_DIR)/semaphore.o \
 	$(OBJ_DIR)/sequencer.o \
+	$(OBJ_DIR)/socket.o \
 	$(OBJ_DIR)/string.o \
 	$(OBJ_DIR)/subprocess.o \
 	$(OBJ_DIR)/thread.o \
@@ -378,7 +381,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps check-fiber-defects
+TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps check-fiber-defects check-loop-defects
 
 # Used by check-clang. Empty when clang is not installed, which that
 # target reports rather than failing over.
@@ -387,7 +390,7 @@ CLANG := $(shell command -v clang 2>/dev/null)
 # Sources whose #ifdef _WIN32 bodies are parse-checked. Add a file here in
 # the same commit that gives it a Windows branch, or the branch ships
 # untokenised.
-WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c src/fiber.c
+WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c src/fiber.c src/socket.c src/loop.c
 
 
 
@@ -400,7 +403,7 @@ all: $(APP_DIR)/$(TARGET) ## Build the shared library
 # Dependency Inclusion
 ####################################################################
 # Compiler-generated .d files (see -MMD -MP -MF in compile commands).
-TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-fiber test-path test-file test-dir
+TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-fiber test-socket test-loop test-path test-file test-dir
 TEST_BINARIES := $(foreach t,$(TEST_NAMES),$(APP_DIR)/$(t)$(EXE_EXTENSION))
 TEST_DEPFILES := $(addprefix $(APP_DIR)/,$(TEST_NAMES:%=%.d))
 DEPFILES := $(LIBOBJECTS:.o=.d) $(TEST_DEPFILES)
@@ -716,6 +719,16 @@ $(APP_DIR)/test-fiber$(EXE_EXTENSION): test/test-fiber.cpp $(FLAGS_STAMP) | $(AP
 	@printf "\n### Compiling Fiber Test ###\n"
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-fiber.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
+
+$(APP_DIR)/test-socket$(EXE_EXTENSION): test/test-socket.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
+	@printf "\n### Compiling Socket Test ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-socket.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
+
+$(APP_DIR)/test-loop$(EXE_EXTENSION): test/test-loop.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
+	@printf "\n### Compiling Loop Test ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-loop.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
 
 $(APP_DIR)/test-file$(EXE_EXTENSION): test/test-file.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Compiling File Test ###\n"
@@ -1233,7 +1246,7 @@ test-ubsan: test-asan
 # that is here to watch the synchronisation primitives themselves. Add a name
 # here once its test is expected to be clean under TSan.
 
-TSAN_TEST_NAMES := test-mutex test-cond test-barrier test-once test-rwlock test-tls test-atomic test-semaphore test-thread test-pool test-sequencer test-fiber
+TSAN_TEST_NAMES := test-mutex test-cond test-barrier test-once test-rwlock test-tls test-atomic test-semaphore test-thread test-pool test-sequencer test-fiber test-socket test-loop
 
 TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g $(SAN_OPT_CFLAGS)
 
@@ -1482,6 +1495,112 @@ else
 		'FAILED +\] Fiber\.EachFiberRunsAsItsOwnContextToThreadSanitizer' \
 		LD_PRELOAD= TSAN_OPTIONS=halt_on_error=1; \
 	printf "\033[0;32mEvery planted fiber defect that could be run was caught.\033[0m\n"
+endif
+
+# ---------------------------------------------------------------------------
+# The loop gate, and the defects it plants
+#
+# The loop tests are only worth running if they are known to fail when the
+# loop is wrong.  This builds the library again with one deliberate defect
+# compiled into src/loop.c (the GCU_LOOP_PLANT_* macros, which no ordinary
+# build defines), runs the one test that carries that defect, and requires it
+# to report:
+#
+#   no-wake       gcu_loop_post() queues the record and never wakes the loop.
+#                 The test waits in the OS with no timeout, so the loop hangs
+#                 and the hang guard names the test.
+#   cancel-early  gcu_loop_cancel() reports CANCELLED at once and leaves the
+#                 OS reading into the buffer the caller may now free.  The
+#                 test that checks the callback has not run, and that the
+#                 buffer stays untouched, must fail ...
+#   cancel-early  ... and, in the ASan tree, the test that frees the buffer in
+#                 the completion must get a heap-use-after-free report.
+#   timer-order   the timer queue is ordered by start, not by deadline: the
+#                 timer test must fail.
+#
+# Each arm also runs the real library first, with the same filter, and
+# requires it to be quiet, so a gate that fails for some other reason cannot
+# pass as having caught the defect.  test/check-loop-defects.sh is the arm;
+# this is the building, and mirrors check-fiber-defects above.  Linux only:
+# the Windows arm is exercised by tools/xwin/loop.sh and the arm64 build by
+# tools/xarch/loop.sh, each with these same defects.
+# ---------------------------------------------------------------------------
+
+LOOP_PLANTS := no-wake:NO_WAKE cancel-early:CANCEL_EARLY_RELEASE timer-order:TIMER_ORDER
+
+define LOOP_PLANT_RULE
+$(APP_DIR)/plant-loop-$(1)/loop.o: src/loop.c $(FLAGS_STAMP) \
+		| $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h \
+		  $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
+	@printf "\n### Compiling loop.c with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(CFLAGS) -DGCU_LOOP_PLANT_$(2) $$(INCLUDE) -c $$< -o $$@ $$(OS_SPECIFIC_COMPILE_FLAGS)
+
+$(APP_DIR)/plant-loop-$(1)/$(TARGET): $(APP_DIR)/plant-loop-$(1)/loop.o \
+		$(filter-out $(OBJ_DIR)/loop.o,$(LIBOBJECTS)) $(FLAGS_STAMP)
+	@printf "\n### Linking a library with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(CFLAGS) $$(OS_SPECIFIC_LINK_FLAGS) -o $$@ $(APP_DIR)/plant-loop-$(1)/loop.o $(filter-out $(OBJ_DIR)/loop.o,$(LIBOBJECTS)) $$(LDFLAGS) $$(OS_SPECIFIC_LIBRARY_NAME_FLAG)
+	@ln -f -s $(TARGET) $(APP_DIR)/plant-loop-$(1)/$(SO_NAME)
+	@ln -f -s $(SO_NAME) $(APP_DIR)/plant-loop-$(1)/$(BASE_NAME)
+endef
+$(foreach p,$(LOOP_PLANTS),$(eval $(call LOOP_PLANT_RULE,$(word 1,$(subst :, ,$(p))),$(word 2,$(subst :, ,$(p))))))
+
+define ASAN_LOOP_PLANT_RULE
+$(ASAN_APP_DIR)/plant-loop-$(1)/loop.o: src/loop.c $(ASAN_FLAGS_STAMP) \
+		| $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h \
+		  $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
+	@printf "\n### Compiling (ASan+UBSan) loop.c with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(ASAN_CFLAGS) -DGCU_LOOP_PLANT_$(2) $$(INCLUDE) -c $$< -o $$@ $$(OS_SPECIFIC_COMPILE_FLAGS)
+
+$(ASAN_APP_DIR)/plant-loop-$(1)/$(ASAN_TARGET): $(ASAN_APP_DIR)/plant-loop-$(1)/loop.o \
+		$(filter-out $(ASAN_OBJ_DIR)/loop.o,$(ASAN_LIBOBJECTS)) $(ASAN_FLAGS_STAMP)
+	@printf "\n### Linking (ASan+UBSan) a library with $(2) planted ###\n"
+	@mkdir -p $$(@D)
+	$$(CC) $$(ASAN_CFLAGS) $$(OS_SPECIFIC_LINK_FLAGS) -o $$@ $(ASAN_APP_DIR)/plant-loop-$(1)/loop.o $(filter-out $(ASAN_OBJ_DIR)/loop.o,$(ASAN_LIBOBJECTS)) $$(ASAN_LDFLAGS)
+endef
+$(eval $(call ASAN_LOOP_PLANT_RULE,cancel-early,CANCEL_EARLY_RELEASE))
+
+LOOP_PLANT_LIBS := $(foreach p,$(LOOP_PLANTS),$(APP_DIR)/plant-loop-$(word 1,$(subst :, ,$(p)))/$(TARGET))
+
+.PHONY: check-loop-defects
+check-loop-defects: ## Plant each way the loop can be wrong and require the tests to notice
+ifeq ($(OS_NAME), Linux)
+check-loop-defects: $(APP_DIR)/$(TARGET) $(APP_DIR)/test-loop$(EXE_EXTENSION) $(LOOP_PLANT_LIBS) \
+		$(ASAN_APP_DIR)/$(ASAN_TARGET) $(ASAN_APP_DIR)/test-loop$(EXE_EXTENSION) \
+		$(ASAN_APP_DIR)/plant-loop-cancel-early/$(ASAN_TARGET)
+endif
+check-loop-defects:
+	@printf "\n### Planting each loop defect; the tests must report it ###\n"
+ifneq ($(OS_NAME), Linux)
+	@printf "check-loop-defects: SKIPPED (Linux only); nothing was checked\n"
+else
+	@set -e; \
+	sh test/check-loop-defects.sh "no-wake (post does not wake the loop)" \
+		$(APP_DIR)/test-loop "$(APP_DIR)" "$(APP_DIR)/plant-loop-no-wake" \
+		'TIMED OUT, no answer from: LoopTest\.PostFromAnotherThreadWakesAWaitingLoop' \
+		LD_PRELOAD= GTEST_FILTER='LoopTest.PostFromAnotherThreadWakesAWaitingLoop'; \
+	sh test/check-loop-defects.sh "cancel-early (callback before release)" \
+		$(APP_DIR)/test-loop "$(APP_DIR)" "$(APP_DIR)/plant-loop-cancel-early" \
+		'FAILED +\] LoopNet\.CancelledReadCompletesOnceAndNeverTouchesItsBuffer' \
+		LD_PRELOAD= GTEST_FILTER='LoopNet.CancelledReadCompletesOnceAndNeverTouchesItsBuffer'; \
+	sh test/check-loop-defects.sh "timer-order (queue ordered by start)" \
+		$(APP_DIR)/test-loop "$(APP_DIR)" "$(APP_DIR)/plant-loop-timer-order" \
+		'FAILED +\] LoopTest\.TimersFireInDeadlineOrderAndNotBeforeTheirTime' \
+		LD_PRELOAD= GTEST_FILTER='LoopTest.TimersFireInDeadlineOrderAndNotBeforeTheirTime'; \
+	if [ -n "$(ASAN_RUNTIME)" ]; then \
+		sh test/check-loop-defects.sh "cancel-early (use after free, ASan)" \
+			$(ASAN_APP_DIR)/test-loop "$(ASAN_APP_DIR)" \
+			"$(ASAN_APP_DIR)/plant-loop-cancel-early" \
+			'ERROR: AddressSanitizer: heap-use-after-free' \
+			LD_PRELOAD="$(ASAN_RUNTIME)" \
+			ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+			GTEST_FILTER='LoopNet.CancelledReadBufferMayBeFreedByItsCompletion'; \
+	else \
+		printf "  ASan arm SKIPPED: no ASan runtime to preload (CC is not gcc); nothing was checked there\n"; \
+	fi; \
+	printf "\033[0;32mEvery planted loop defect that could be run was caught.\033[0m\n"
 endif
 
 clean: ## Remove all contents of the build directories.

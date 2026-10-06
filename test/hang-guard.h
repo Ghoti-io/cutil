@@ -28,6 +28,10 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <windows.h>
+#include <io.h>
+#include <cstdlib>
 #endif
 
 namespace ghoti_test {
@@ -54,6 +58,25 @@ extern "C" inline void hangGuardFired(int) {
   // dump for something that is not a crash.
   _exit(1);
 }
+#else
+// Windows has no SIGALRM, so a timer-queue timer plays its part: its callback
+// runs on a pool thread, names the test, and ends the process.  Before this
+// the guard was empty here, which meant a hang under wine or on Windows was a
+// hang -- and the loop's lost-wakeup test exists to turn exactly that into a
+// failure.
+inline HANDLE & hangGuardTimer() {
+  static HANDLE timer = NULL;
+  return timer;
+}
+
+inline VOID CALLBACK hangGuardFired(PVOID, BOOLEAN) {
+  static const char prefix[] = "\n*** TIMED OUT, no answer from: ";
+  static const char suffix[] = " ***\n";
+  _write(2, prefix, (unsigned)(sizeof(prefix) - 1));
+  _write(2, hangGuardName(), (unsigned)hangGuardLength());
+  _write(2, suffix, (unsigned)(sizeof(suffix) - 1));
+  _exit(1);
+}
 #endif
 
 /**
@@ -66,21 +89,29 @@ template <unsigned int Seconds>
 class HangGuarded : public ::testing::Test {
 protected:
   void SetUp() override {
-#ifndef _WIN32
     const ::testing::TestInfo * running =
         ::testing::UnitTest::GetInstance()->current_test_info();
     snprintf(hangGuardName(), 256, "%s.%s",
         running ? running->test_suite_name() : "?",
         running ? running->name() : "?");
     hangGuardLength() = strlen(hangGuardName());
+#ifndef _WIN32
     signal(SIGALRM, hangGuardFired);
     alarm(Seconds);
+#else
+    CreateTimerQueueTimer(&hangGuardTimer(), NULL, hangGuardFired, NULL,
+        Seconds * 1000, 0, WT_EXECUTEONLYONCE);
 #endif
   }
   void TearDown() override {
 #ifndef _WIN32
     alarm(0);
     signal(SIGALRM, SIG_DFL);
+#else
+    if (hangGuardTimer()) {
+      DeleteTimerQueueTimer(NULL, hangGuardTimer(), INVALID_HANDLE_VALUE);
+      hangGuardTimer() = NULL;
+    }
 #endif
   }
 };

@@ -94,6 +94,12 @@ seen in. `fiber.h` is stackful coroutines: a function on a stack of its own
 (guard page below it) that can yield in the middle of a call and be resumed
 later, with its own rounding mode, pinned to the thread that made it. It is
 the mechanism only; which fiber runs next is the caller's policy.
+`socket.h` is non-blocking TCP and UDP over BSD sockets and Winsock, with
+addresses as numbers (no name resolution). `loop.h` is the event loop that
+drives them: start a read, write, accept, connect, datagram or timer as a
+record the caller owns, and learn when it completed (`epoll` on Linux, an I/O
+completion port on Windows). Another thread can only post work into a loop,
+and a fiber can wait on an operation and be resumed on its own thread.
 
 **Files.** `file.h` reads a whole file, replaces one atomically, and offers a
 thin handle for files too large to hold. `dir.h` creates, removes and walks
@@ -122,6 +128,7 @@ The long arguments live next to the modules they belong to:
 | [documentation/thread-pool.md](documentation/thread-pool.md) | The worker pool |
 | [documentation/sequencer.md](documentation/sequencer.md) | The reorder buffer |
 | [documentation/fiber.md](documentation/fiber.md) | Fibers: the switch, guard pages, sanitizer annotations |
+| [documentation/loop.md](documentation/loop.md) | The event loop and sockets: completion-shaped, caller-owned records, one thread |
 | [documentation/random.md](documentation/random.md) | The random engine and the seeded algorithms |
 
 `make docs` builds the manual from the headers.

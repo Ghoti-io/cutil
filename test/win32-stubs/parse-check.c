@@ -22,6 +22,13 @@
 #include <ghoti.io/cutil/subprocess.h>
 #include <ghoti.io/cutil/barrier.h>
 #include <ghoti.io/cutil/fiber.h>
+#include <ghoti.io/cutil/socket.h>
+#include <ghoti.io/cutil/loop.h>
+
+static void loop_callback(GCU_Loop_Op * op, void * user_data) {
+  (void)op;
+  (void)user_data;
+}
 
 static void fiber_entry(void * arg) {
   (void)arg;
@@ -130,6 +137,34 @@ int main(void) {
   rc |= gcu_fiber_is_finished(fiber) ? 1 : 0;
   rc |= (int)gcu_fiber_destroy(fiber);
   rc |= gcu_fiber_result_string(GCU_FIBER_ERR_THREAD) ? 0 : 1;
+
+  // socket.h and loop.h's Windows-facing parts are the support macro, the
+  // plain-data layouts and the declarations; the Winsock and completion-port
+  // calls are in src/socket.c and src/loop.c, which the check-win32-parse
+  // rule compiles separately against these stubs.
+  GCU_Socket_Address address;
+  static const uint8_t four[4] = {127, 0, 0, 1};
+  rc |= (int)gcu_socket_address_ipv4(&address, four, 80);
+  rc |= (int)gcu_socket_address_parse(&address, "::1", 1);
+  char text[GCU_SOCKET_ADDRESS_STRING_MAX];
+  rc |= (int)gcu_socket_address_format(&address, text, sizeof(text));
+  GCU_Socket * sock = 0;
+  rc |= (int)gcu_socket_create(&sock, GCU_SOCKET_IPV4, GCU_SOCKET_STREAM, 0);
+  rc |= (int)gcu_socket_bind(sock, &address);
+  rc |= (int)gcu_socket_set_option(sock, GCU_SOCKET_OPT_NO_DELAY, 1);
+  rc |= (int)gcu_socket_error_kind(10061);
+  rc |= GCU_LOOP_SUPPORTED ? 0 : 1;
+  GCU_Loop * event_loop = 0;
+  GCU_Loop_Op loop_op;
+  gcu_loop_op_init(&loop_op, loop_callback, 0);
+  char loop_buffer[8];
+  rc |= (int)gcu_loop_create(&event_loop, 0);
+  rc |= (int)gcu_loop_read(event_loop, &loop_op, sock, loop_buffer, sizeof(loop_buffer));
+  rc |= (int)gcu_loop_cancel(event_loop, &loop_op);
+  rc |= (int)gcu_loop_run_once(event_loop, 0);
+  rc |= (int)gcu_loop_post(event_loop, &loop_op);
+  rc |= (int)gcu_loop_destroy(event_loop);
+  rc |= (int)gcu_socket_close(sock);
 
   return rc;
 }

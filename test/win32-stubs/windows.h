@@ -16,6 +16,9 @@
 #ifndef GHOTI_IO_GCU_WIN32_STUBS_WINDOWS_H
 #define GHOTI_IO_GCU_WIN32_STUBS_WINDOWS_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifndef _WIN32
 #error "win32-stubs/windows.h included without _WIN32; this is a parse check only"
 #endif
@@ -147,7 +150,17 @@ FARPROC GetProcAddress(HMODULE hModule, const char * lpProcName);
 #define INVALID_HANDLE_VALUE      ((HANDLE)(long)-1)
 #define ZeroMemory(d, l)          gcu_stub_zero((d), (l))
 typedef void * HANDLE;
-typedef struct _GCU_STUB_OVERLAPPED { unsigned long Internal; } OVERLAPPED;
+/* The real layout, with fixed-width members where Windows' DWORD would be
+ * narrower than this stub's: loop.c asserts that an OVERLAPPED fits a record. */
+typedef struct _GCU_STUB_OVERLAPPED {
+  uintptr_t Internal;
+  uintptr_t InternalHigh;
+  union {
+    struct { uint32_t Offset; uint32_t OffsetHigh; } s;
+    void * Pointer;
+  } u;
+  HANDLE hEvent;
+} OVERLAPPED;
 void gcu_stub_zero(void * destination, unsigned long length);
 HANDLE CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess,
     DWORD dwShareMode, void * lpSecurityAttributes, DWORD dwCreationDisposition,
@@ -266,5 +279,174 @@ LPVOID GetCurrentFiber(void);
 VOID SwitchToFiber(LPVOID lpFiber);
 VOID DeleteFiber(LPVOID lpFiber);
 DWORD GetCurrentThreadId(void);
+
+#endif
+
+/* --- appended for socket.h / socket.c / loop.c (Winsock and IOCP) --- */
+#ifndef GHOTI_IO_GCU_WIN32_STUBS_SOCKET
+#define GHOTI_IO_GCU_WIN32_STUBS_SOCKET
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* Sizes matter here: loop.c asserts that an OVERLAPPED and the address
+ * blocks fit the record, so these use the real layouts (fixed-width where
+ * the stub's DWORD, which is a long, would be wider than Windows'). */
+typedef uintptr_t SOCKET;
+typedef uintptr_t ULONG_PTR;
+typedef unsigned long u_long;
+typedef unsigned short u_short;
+typedef unsigned short WORD;
+typedef unsigned long ULONG;
+typedef ULONG * PULONG;
+typedef DWORD * LPDWORD;
+typedef int * LPINT;
+typedef char CHAR;
+typedef int INT;
+
+#define WSAAPI
+#define PASCAL
+#define MAKEWORD(a, b) ((WORD)(((unsigned char)(a)) | (((WORD)((unsigned char)(b))) << 8)))
+
+#define INVALID_SOCKET ((SOCKET)(~0))
+#define SOCKET_ERROR (-1)
+#define AF_INET 2
+#define AF_INET6 23
+#define SOCK_STREAM 1
+#define SOCK_DGRAM 2
+#define IPPROTO_TCP 6
+#define IPPROTO_IPV6 41
+#define SOL_SOCKET 0xffff
+#define SOMAXCONN 0x7fffffff
+#define SO_REUSEADDR 0x0004
+#define SO_KEEPALIVE 0x0008
+#define SO_LINGER 0x0080
+#define SO_SNDBUF 0x1001
+#define SO_RCVBUF 0x1002
+#define SO_UPDATE_ACCEPT_CONTEXT 0x700B
+#define SO_UPDATE_CONNECT_CONTEXT 0x7010
+#define TCP_NODELAY 0x0001
+#define IPV6_V6ONLY 27
+#define FIONBIO 0x8004667e
+#define INET6_ADDRSTRLEN 65
+#define WSA_FLAG_OVERLAPPED 0x01
+#define WSA_FLAG_NO_HANDLE_INHERIT 0x80
+#define WSA_IO_PENDING 997L
+#define WSA_OPERATION_ABORTED 995L
+#define WSAEMSGSIZE 10040L
+#define WSAECONNREFUSED 10061L
+#define WSAECONNRESET 10054L
+#define WSAECONNABORTED 10053L
+#define WSAETIMEDOUT 10060L
+#define WSAENETUNREACH 10051L
+#define WSAEHOSTUNREACH 10065L
+#define WSAENETDOWN 10050L
+#define WSAEHOSTDOWN 10064L
+#define WSAEADDRINUSE 10048L
+#define WSAENOTCONN 10057L
+#define WSAESHUTDOWN 10058L
+#define WSAECANCELLED 10103L
+#define SIO_GET_EXTENSION_FUNCTION_POINTER 0xC8000006
+#define ERROR_NOT_FOUND 1168UL
+
+typedef struct _GCU_STUB_WSADATA {
+  WORD wVersion;
+  WORD wHighVersion;
+  char szDescription[257];
+  char szSystemStatus[129];
+} WSADATA;
+
+struct in_addr { uint8_t bytes[4]; };
+struct in6_addr { uint8_t bytes[16]; };
+struct sockaddr { u_short sa_family; char sa_data[14]; };
+struct sockaddr_in {
+  u_short sin_family; u_short sin_port; struct in_addr sin_addr; char sin_zero[8];
+};
+struct sockaddr_in6 {
+  u_short sin6_family; u_short sin6_port; uint32_t sin6_flowinfo;
+  struct in6_addr sin6_addr; uint32_t sin6_scope_id;
+};
+struct sockaddr_storage { u_short ss_family; char pad[126]; };
+typedef struct sockaddr_in SOCKADDR_IN;
+typedef struct sockaddr_in6 SOCKADDR_IN6;
+struct linger { u_short l_onoff; u_short l_linger; };
+
+u_short htons(u_short hostshort);
+u_short ntohs(u_short netshort);
+int inet_pton(int Family, const char * pszAddrString, void * pAddrBuf);
+const char * inet_ntop(int Family, const void * pAddr, char * pStringBuf,
+    size_t StringBufSize);
+
+int WSAStartup(WORD wVersionRequested, WSADATA * lpWSAData);
+int WSAGetLastError(void);
+SOCKET WSASocketW(int af, int type, int protocol, void * lpProtocolInfo,
+    unsigned int g, DWORD dwFlags);
+int closesocket(SOCKET s);
+int ioctlsocket(SOCKET s, long cmd, u_long * argp);
+int bind(SOCKET s, const struct sockaddr * name, int namelen);
+int listen(SOCKET s, int backlog);
+int getsockname(SOCKET s, struct sockaddr * name, int * namelen);
+int getpeername(SOCKET s, struct sockaddr * name, int * namelen);
+int setsockopt(SOCKET s, int level, int optname, const char * optval, int optlen);
+int getsockopt(SOCKET s, int level, int optname, char * optval, int * optlen);
+int shutdown(SOCKET s, int how);
+
+typedef OVERLAPPED * LPOVERLAPPED;
+typedef OVERLAPPED * LPWSAOVERLAPPED;
+typedef void (* LPWSAOVERLAPPED_COMPLETION_ROUTINE)(DWORD, DWORD, LPWSAOVERLAPPED, DWORD);
+
+typedef struct _GCU_STUB_OVERLAPPED_ENTRY {
+  ULONG_PTR lpCompletionKey;
+  LPOVERLAPPED lpOverlapped;
+  ULONG_PTR Internal;
+  uint32_t dwNumberOfBytesTransferred;
+} OVERLAPPED_ENTRY, * LPOVERLAPPED_ENTRY;
+
+typedef struct _GCU_STUB_WSABUF { ULONG len; CHAR * buf; } WSABUF, * LPWSABUF;
+typedef struct _GCU_STUB_GUID {
+  uint32_t Data1; uint16_t Data2; uint16_t Data3; uint8_t Data4[8];
+} GUID;
+#define WSAID_CONNECTEX \
+  {0x25a207b9, 0xddf3, 0x4660, {0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e}}
+typedef BOOL (PASCAL * LPFN_CONNECTEX)(SOCKET s, const struct sockaddr * name,
+    int namelen, PVOID lpSendBuffer, DWORD dwSendDataLength,
+    LPDWORD lpdwBytesSent, LPOVERLAPPED lpOverlapped);
+
+HANDLE CreateIoCompletionPort(HANDLE FileHandle, HANDLE ExistingCompletionPort,
+    ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads);
+BOOL GetQueuedCompletionStatusEx(HANDLE CompletionPort,
+    LPOVERLAPPED_ENTRY lpCompletionPortEntries, ULONG ulCount,
+    PULONG ulNumEntriesRemoved, DWORD dwMilliseconds, BOOL fAlertable);
+BOOL PostQueuedCompletionStatus(HANDLE CompletionPort,
+    DWORD dwNumberOfBytesTransferred, ULONG_PTR dwCompletionKey,
+    LPOVERLAPPED lpOverlapped);
+BOOL CancelIoEx(HANDLE hFile, LPOVERLAPPED lpOverlapped);
+BOOL QueryPerformanceFrequency(LARGE_INTEGER * lpFrequency);
+BOOL QueryPerformanceCounter(LARGE_INTEGER * lpPerformanceCount);
+
+int WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+int WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesSent, DWORD dwFlags, LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+int WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, struct sockaddr * lpFrom,
+    LPINT lpFromlen, LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+int WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const struct sockaddr * lpTo,
+    int iTolen, LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+int WSAIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
+    DWORD cbInBuffer, LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+    LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+BOOL WSAGetOverlappedResult(SOCKET s, LPWSAOVERLAPPED lpOverlapped,
+    LPDWORD lpcbTransfer, BOOL fWait, LPDWORD lpdwFlags);
+BOOL AcceptEx(SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lpOutputBuffer,
+    DWORD dwReceiveDataLength, DWORD dwLocalAddressLength,
+    DWORD dwRemoteAddressLength, LPDWORD lpdwBytesReceived,
+    LPOVERLAPPED lpOverlapped);
 
 #endif
