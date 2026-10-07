@@ -650,6 +650,111 @@ GCU_API GCU_File_Result gcu_file_write_atomic(const char * path,
   const void * data, size_t len, GCU_File_Sync sync, GCU_File_Perms perms,
   const GCU_Allocator * allocator);
 
+/**
+ * Which file a path is, for telling two names of one file apart.
+ *
+ * ::GCU_File_Info leaves this out on purpose: a uid or a permission model
+ * cannot be described on both platforms, and that struct refuses to pretend.
+ * A hard link is the case that still needs an answer. Two directory entries
+ * are the same file when the device and inode agree, and `links` is how many
+ * names the file has, so a walk can see that one of them is outside the tree
+ * it was given. `mode` is the permission bits only (setuid, setgid and sticky
+ * included, the file-type bits not). On Windows a Unix mode does not apply
+ * and `mode` is 0; the identity itself is still reported.
+ *
+ * Does not follow a symbolic link at the end of the path.
+ */
+typedef struct GCU_File_Identity {
+  uint64_t device; ///< The device holding the file.
+  uint64_t inode;  ///< The file's identity on that device.
+  uint64_t links;  ///< How many directory entries name it.
+  uint32_t mode;   ///< Permission bits, or 0 where a Unix mode does not apply.
+} GCU_File_Identity;
+
+/**
+ * Ask which file is at a path, without following a final symbolic link.
+ *
+ * @param path The path to ask about.
+ * @param out Filled in on success; untouched otherwise.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID, ::GCU_FILE_ERR_NOT_FOUND,
+ *   ::GCU_FILE_ERR_ACCESS or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_identity(const char * path,
+  GCU_File_Identity * out);
+
+/**
+ * Create a symbolic link.
+ *
+ * @p target is stored as the link text. It need not name anything that
+ * exists, and it is not rewritten: a relative target stays relative.
+ *
+ * On Windows this does not apply. The call returns ::GCU_FILE_ERR_ACCESS and
+ * creates nothing, rather than reporting success or writing an ordinary file
+ * in the link's place. A symbolic link there needs a privilege a normal user
+ * does not have, and pretending one was created is worse than saying so.
+ *
+ * @param target The link text. Not NULL.
+ * @param path The path of the new link. Not NULL.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID, ::GCU_FILE_ERR_EXISTS,
+ *   ::GCU_FILE_ERR_NOT_FOUND (a missing parent), ::GCU_FILE_ERR_ACCESS or
+ *   ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_symlink(const char * target,
+  const char * path);
+
+/**
+ * Read the text of a symbolic link.
+ *
+ * The buffer is NUL-terminated one byte past `out_len`, which is not counted
+ * in it, the same arrangement as ::gcu_file_read(). The text is what the link
+ * stores, not a resolved path, and it may be relative.
+ *
+ * @param path The link to read.
+ * @param allocator Allocator for the buffer, or NULL for the default.
+ * @param out_target Receives the buffer, owned by the caller and released
+ *   with ::gcu_file_free(). Written only on success.
+ * @param out_len Receives the length, excluding the added NUL. Written only
+ *   on success.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID, ::GCU_FILE_ERR_NOT_FOUND,
+ *   ::GCU_FILE_ERR_OOM, ::GCU_FILE_ERR_ACCESS or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_read_link(const char * path,
+  const GCU_Allocator * allocator, char ** out_target, size_t * out_len);
+
+/**
+ * Create a hard link.
+ *
+ * @p path becomes another name for the file at @p existing. The two are one
+ * file afterwards: the bytes are not copied.
+ *
+ * @param existing A path that already names the file.
+ * @param path The new name. It must not already exist.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID, ::GCU_FILE_ERR_NOT_FOUND,
+ *   ::GCU_FILE_ERR_EXISTS, ::GCU_FILE_ERR_ACCESS or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_hardlink(const char * existing,
+  const char * path);
+
+/**
+ * Set the permission bits of a path.
+ *
+ * Applies @p mode as it is given. Setuid, setgid and sticky are included when
+ * the caller passes them and cleared when the caller does not: this function
+ * does not have a policy about them. It follows a symbolic link, as `chmod`
+ * does, so the bits land on the file the link names.
+ *
+ * On Windows a Unix mode does not apply. The call returns
+ * ::GCU_FILE_ERR_ACCESS and changes nothing, rather than reporting success
+ * for a mode it did not set. A path that is not there is still
+ * ::GCU_FILE_ERR_NOT_FOUND, so the two failures stay apart.
+ *
+ * @param path The path to change.
+ * @param mode The permission bits to set.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID, ::GCU_FILE_ERR_NOT_FOUND,
+ *   ::GCU_FILE_ERR_ACCESS or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_set_mode(const char * path, uint32_t mode);
+
 #ifdef __cplusplus
 }
 #endif

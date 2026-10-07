@@ -1186,6 +1186,120 @@ TEST_F(FileHandle, NullArgumentsAreRefusedRatherThanFatal) {
   EXPECT_FALSE(gcu_file_eof(nullptr));
   EXPECT_FALSE(gcu_file_eof(&zeroed));
 }
+
+TEST_F(Scratch, SymlinkStoresTheTextItWasGivenAndReadLinkReturnsIt) {
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_symlink("target-text", at("link").c_str()));
+  char * text = nullptr;
+  size_t len = 0;
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_read_link(at("link").c_str(), nullptr, &text, &len));
+  EXPECT_EQ(string("target-text"), string(text, len));
+  gcu_file_free(nullptr, text);
+
+  GCU_File_Info info;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_stat_link(at("link").c_str(), &info));
+  EXPECT_EQ(GCU_FILE_TYPE_SYMLINK, info.type);
+
+  put(at("file"), "bytes");
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_symlink("file", at("alias").c_str()));
+  GCU_File_Identity link_id;
+  GCU_File_Identity file_id;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("alias").c_str(), &link_id));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("file").c_str(), &file_id));
+  EXPECT_NE(link_id.inode, file_id.inode);
+
+  std::string long_target(200, 'a');
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_symlink(long_target.c_str(), at("long").c_str()));
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_read_link(at("long").c_str(), nullptr, &text, &len));
+  EXPECT_EQ(long_target, string(text, len));
+  gcu_file_free(nullptr, text);
+}
+
+TEST_F(Scratch, HardLinkIsASecondNameForTheSameFile) {
+  put(at("orig"), "same-bytes");
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_hardlink(at("orig").c_str(), at("alias").c_str()));
+  GCU_File_Identity left;
+  GCU_File_Identity right;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("orig").c_str(), &left));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("alias").c_str(), &right));
+  EXPECT_EQ(left.device, right.device);
+  EXPECT_EQ(left.inode, right.inode);
+  EXPECT_GE(left.links, 2u);
+
+  void * data = nullptr;
+  size_t got = 0;
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_read(at("alias").c_str(), GCU_FILE_UNLIMITED, nullptr, &data,
+          &got));
+  EXPECT_EQ(string("same-bytes"), string((char *)data, got));
+  gcu_file_free(nullptr, data);
+}
+
+TEST_F(Scratch, SetModeAppliesTheBitsItIsGiven) {
+  put(at("f"), "x");
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_set_mode(at("f").c_str(), 0640));
+  EXPECT_EQ(0640, mode_of(at("f")));
+  GCU_File_Identity id;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("f").c_str(), &id));
+  EXPECT_EQ(0640u, id.mode);
+
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_set_mode(at("f").c_str(), 04555));
+  EXPECT_EQ(04555, mode_of(at("f")));
+
+  put(at("target"), "y");
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_set_mode(at("target").c_str(), 0600));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_symlink("target", at("via").c_str()));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_set_mode(at("via").c_str(), 0644));
+  GCU_File_Identity target_id;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_identity(at("target").c_str(), &target_id));
+  EXPECT_EQ(0644u, target_id.mode);
+}
+
+TEST_F(Scratch, LinkAndModeRefuseAMissingPathAndANullArgument) {
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_symlink(nullptr, at("l").c_str()));
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_symlink("t", nullptr));
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_hardlink(nullptr, at("l").c_str()));
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_hardlink(at("f").c_str(), nullptr));
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_set_mode(nullptr, 0644));
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_identity(at("f").c_str(), nullptr));
+  char * text = nullptr;
+  size_t len = 0;
+  EXPECT_EQ(GCU_FILE_ERR_INVALID,
+      gcu_file_read_link(nullptr, nullptr, &text, &len));
+  EXPECT_EQ(GCU_FILE_ERR_NOT_FOUND,
+      gcu_file_hardlink(at("missing").c_str(), at("alias").c_str()));
+  EXPECT_EQ(GCU_FILE_ERR_NOT_FOUND,
+      gcu_file_set_mode(at("missing").c_str(), 0644));
+  EXPECT_EQ(GCU_FILE_ERR_NOT_FOUND,
+      gcu_file_read_link(at("missing").c_str(), nullptr, &text, &len));
+  EXPECT_EQ(nullptr, text);
+
+  put(at("f"), "x");
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_symlink("t", at("link").c_str()));
+  EXPECT_EQ(GCU_FILE_ERR_EXISTS,
+      gcu_file_symlink("other", at("link").c_str()));
+  EXPECT_EQ(GCU_FILE_ERR_EXISTS,
+      gcu_file_hardlink(at("f").c_str(), at("link").c_str()));
+  EXPECT_NE(GCU_FILE_OK,
+      gcu_file_read_link(at("f").c_str(), nullptr, &text, &len));
+  EXPECT_EQ(nullptr, text);
+}
+#endif
+
+#ifdef _WIN32
+TEST_F(Scratch, SetModeAndSymlinkDoNotApplyAndDoNotPretendTo) {
+  put(at("f"), "x");
+  EXPECT_EQ(GCU_FILE_ERR_ACCESS, gcu_file_set_mode(at("f").c_str(), 0640));
+  EXPECT_EQ(GCU_FILE_ERR_NOT_FOUND,
+      gcu_file_set_mode(at("missing").c_str(), 0644));
+  EXPECT_EQ(GCU_FILE_ERR_ACCESS,
+      gcu_file_symlink("target", at("link").c_str()));
+  EXPECT_FALSE(gcu_file_exists(at("link").c_str()));
+}
 #endif
 
 TEST(FileResultString, NamesEveryValueAndRefusesNone) {

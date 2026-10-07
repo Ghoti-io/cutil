@@ -37,6 +37,7 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ghoti.io/cutil/file.h>
@@ -1134,4 +1135,254 @@ GCU_File_Result gcu_file_write_atomic(const char * path, const void * data,
   }
 
   return gcu_file_temp_commit(&temp, path, sync, perms);
+}
+
+#ifdef _WIN32
+/** Map a Win32 error from the link and mode calls onto a file result. */
+static GCU_File_Result file_result_from_win32(DWORD err) {
+  /* TODO(windows): never compiled or run on Windows. */
+  if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+    return GCU_FILE_ERR_NOT_FOUND;
+  }
+  if (err == ERROR_ACCESS_DENIED || err == ERROR_PRIVILEGE_NOT_HELD) {
+    return GCU_FILE_ERR_ACCESS;
+  }
+  if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
+    return GCU_FILE_ERR_EXISTS;
+  }
+  return GCU_FILE_ERR_IO;
+}
+#endif
+
+GCU_File_Result gcu_file_identity(const char * path, GCU_File_Identity * out) {
+  if (!path || !out) {
+    return GCU_FILE_ERR_INVALID;
+  }
+#ifdef _WIN32
+  /* TODO(windows): never compiled or run on Windows.  A Unix mode does not
+   * apply, so mode stays 0; the file index is what a hard link is compared
+   * by, and that does exist here. */
+  wchar_t * wide = gcu_path_internal_to_wide(NULL, path);
+  if (!wide) {
+    return GCU_FILE_ERR_OOM;
+  }
+  HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  DWORD open_err = GetLastError();
+  gcu_allocator_free(NULL, wide);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return file_result_from_win32(open_err);
+  }
+  BY_HANDLE_FILE_INFORMATION info;
+  BOOL ok = GetFileInformationByHandle(handle, &info);
+  DWORD err = GetLastError();
+  CloseHandle(handle);
+  if (!ok) {
+    return file_result_from_win32(err);
+  }
+  out->device = info.dwVolumeSerialNumber;
+  out->inode = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+  out->links = info.nNumberOfLinks;
+  out->mode = 0;
+  return GCU_FILE_OK;
+#else
+  struct stat info;
+  if (lstat(path, &info) != 0) {
+    return gcu_file_internal_from_errno(errno);
+  }
+  out->device = (uint64_t)info.st_dev;
+  out->inode = (uint64_t)info.st_ino;
+  out->links = (uint64_t)info.st_nlink;
+  out->mode = (uint32_t)(info.st_mode & 07777);
+  return GCU_FILE_OK;
+#endif
+}
+
+GCU_File_Result gcu_file_symlink(const char * target, const char * path) {
+  if (!target || !path) {
+    return GCU_FILE_ERR_INVALID;
+  }
+#ifdef _WIN32
+  /* A symbolic link needs a privilege a normal user does not have. Reporting
+   * success, or writing a regular file where the link would have been, would
+   * both be lies. The call does not apply, and nothing is created. */
+  (void)target;
+  (void)path;
+  return GCU_FILE_ERR_ACCESS;
+#else
+  if (symlink(target, path) != 0) {
+    return gcu_file_internal_from_errno(errno);
+  }
+  return GCU_FILE_OK;
+#endif
+}
+
+GCU_File_Result gcu_file_read_link(const char * path,
+    const GCU_Allocator * allocator, char ** out_target, size_t * out_len) {
+  if (!path || !out_target || !out_len) {
+    return GCU_FILE_ERR_INVALID;
+  }
+  if (!allocator) {
+    allocator = gcu_allocator_default();
+  }
+#ifdef _WIN32
+  /* TODO(windows): never compiled or run on Windows. */
+  wchar_t * wide = gcu_path_internal_to_wide(allocator, path);
+  if (!wide) {
+    return GCU_FILE_ERR_OOM;
+  }
+  HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  DWORD open_err = GetLastError();
+  gcu_allocator_free(allocator, wide);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return file_result_from_win32(open_err);
+  }
+  /* The reparse buffer is not in the headers this file can include portably,
+   * so the symlink layout is spelled here. PrintNameOffset is a byte offset
+   * from PathBuffer. */
+  typedef struct GCU_Reparse_Symlink {
+    ULONG tag;
+    USHORT data_length;
+    USHORT reserved;
+    USHORT substitute_offset;
+    USHORT substitute_length;
+    USHORT print_offset;
+    USHORT print_length;
+    ULONG flags;
+    WCHAR path_buffer[1];
+  } GCU_Reparse_Symlink;
+  uint8_t raw[16 * 1024];
+  DWORD got = 0;
+  BOOL ok = DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, NULL, 0, raw,
+      sizeof raw, &got, NULL);
+  DWORD err = GetLastError();
+  CloseHandle(handle);
+  if (!ok) {
+    return file_result_from_win32(err);
+  }
+  if (got < sizeof(ULONG) + 2 * sizeof(USHORT)) {
+    return GCU_FILE_ERR_IO;
+  }
+  GCU_Reparse_Symlink * link = (GCU_Reparse_Symlink *)raw;
+  /* A junction's path sits where a symlink's flags word is. This reads
+   * symlinks only. */
+  if (link->tag != IO_REPARSE_TAG_SYMLINK) {
+    return GCU_FILE_ERR_IO;
+  }
+  USHORT offset = link->print_length ? link->print_offset
+                                      : link->substitute_offset;
+  USHORT length = link->print_length ? link->print_length
+                                      : link->substitute_length;
+  if ((length % (USHORT)sizeof(wchar_t)) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+  /* Offsets are from path_buffer, not from the start of the reparse buffer. */
+  size_t base = offsetof(GCU_Reparse_Symlink, path_buffer);
+  if (base > got || (size_t)offset + (size_t)length > got - base) {
+    return GCU_FILE_ERR_IO;
+  }
+  size_t chars = (size_t)length / sizeof(wchar_t);
+  wchar_t * text = (wchar_t *)gcu_allocator_malloc(allocator,
+      (chars + 1) * sizeof(wchar_t));
+  if (!text) {
+    return GCU_FILE_ERR_OOM;
+  }
+  memcpy(text, (uint8_t *)link->path_buffer + offset, length);
+  text[chars] = L'\0';
+  char * utf8 = gcu_path_internal_from_wide(allocator, text);
+  gcu_allocator_free(allocator, text);
+  if (!utf8) {
+    return GCU_FILE_ERR_OOM;
+  }
+  *out_target = utf8;
+  *out_len = strlen(utf8);
+  return GCU_FILE_OK;
+#else
+  size_t capacity = 128;
+  for (;;) {
+    char * buffer = (char *)gcu_allocator_malloc(allocator, capacity);
+    if (!buffer) {
+      return GCU_FILE_ERR_OOM;
+    }
+    ssize_t got = readlink(path, buffer, capacity);
+    if (got < 0) {
+      int saved = errno;
+      gcu_allocator_free(allocator, buffer);
+      return gcu_file_internal_from_errno(saved);
+    }
+    /* readlink does not say whether the buffer was exactly full or short by
+     * one, so a full buffer is read again larger. The extra byte below is
+     * the terminator, which is not part of the length. */
+    if ((size_t)got < capacity) {
+      buffer[got] = '\0';
+      *out_target = buffer;
+      *out_len = (size_t)got;
+      return GCU_FILE_OK;
+    }
+    gcu_allocator_free(allocator, buffer);
+    if (capacity > (SIZE_MAX / 2)) {
+      return GCU_FILE_ERR_IO;
+    }
+    capacity *= 2;
+  }
+#endif
+}
+
+GCU_File_Result gcu_file_hardlink(const char * existing, const char * path) {
+  if (!existing || !path) {
+    return GCU_FILE_ERR_INVALID;
+  }
+#ifdef _WIN32
+  /* TODO(windows): never compiled or run on Windows. */
+  wchar_t * from = gcu_path_internal_to_wide(NULL, existing);
+  if (!from) {
+    return GCU_FILE_ERR_OOM;
+  }
+  wchar_t * to = gcu_path_internal_to_wide(NULL, path);
+  if (!to) {
+    gcu_allocator_free(NULL, from);
+    return GCU_FILE_ERR_OOM;
+  }
+  BOOL ok = CreateHardLinkW(to, from, NULL);
+  DWORD err = GetLastError();
+  gcu_allocator_free(NULL, from);
+  gcu_allocator_free(NULL, to);
+  if (!ok) {
+    return file_result_from_win32(err);
+  }
+  return GCU_FILE_OK;
+#else
+  if (link(existing, path) != 0) {
+    return gcu_file_internal_from_errno(errno);
+  }
+  return GCU_FILE_OK;
+#endif
+}
+
+GCU_File_Result gcu_file_set_mode(const char * path, uint32_t mode) {
+  if (!path) {
+    return GCU_FILE_ERR_INVALID;
+  }
+#ifdef _WIN32
+  /* A Unix mode does not apply. _wchmod would move only the read-only
+   * attribute and report success, which is a mode this call did not set.
+   * A missing path is still a missing path, so that failure is asked first. */
+  (void)mode;
+  GCU_File_Info info;
+  GCU_File_Result looked = gcu_file_stat_link(path, &info);
+  if (looked != GCU_FILE_OK) {
+    return looked;
+  }
+  return GCU_FILE_ERR_ACCESS;
+#else
+  if (chmod(path, (mode_t)mode) != 0) {
+    return gcu_file_internal_from_errno(errno);
+  }
+  return GCU_FILE_OK;
+#endif
 }

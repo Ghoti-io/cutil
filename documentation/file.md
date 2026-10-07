@@ -716,14 +716,20 @@ list of things genuinely decided against.
 - **No ownership, ACLs or extended attributes.**  Section 8.
 - **No file watching.**  `inotify`, `kqueue` and `ReadDirectoryChangesW` agree
   on almost nothing, including whether a rename is one event or two.
-- **No symbolic link creation.**  Reading a link's type is supported because
-  every walk needs it; making one needs a privilege on Windows that a normal
-  user does not have, and an API that fails for most callers is worse than one
-  that is absent.
+- **Symbolic link creation fails closed on Windows.**  Reading a link's type
+  is supported because every walk needs it. Making one needs a privilege there
+  that a normal user does not have. `gcu_file_symlink()` exists because a
+  caller extracting an archive has to create the link or refuse it, and an
+  absent function would push that caller into `open` and `symlink` itself.
+  On Windows the call returns `GCU_FILE_ERR_ACCESS` and creates nothing — it
+  does not report success, and it does not write an ordinary file where the
+  link would have been. `gcu_file_set_mode()` is the same shape for a Unix
+  mode, which does not apply there: the error is real, and a missing path is
+  still `GCU_FILE_ERR_NOT_FOUND` so the two are not one answer.
 
 ## 16. Testing
 
-`test/test-file.cpp`, 66 tests, and `test/test-dir.cpp`, 17.  Both clean under
+`test/test-file.cpp`, 72 tests, and `test/test-dir.cpp`, 17.  Both clean under
 ASan+UBSan and under Valgrind with `--leak-check=full`.  The matcher's tests
 live with the rest of the path work.
 
