@@ -54,7 +54,7 @@
  *
  * The Windows arm honours `GCU_FIBER_PLANT_NO_MXCSR` and
  * `GCU_FIBER_PLANT_NO_X87CW` as well, since it saves the same two registers,
- * and `tools/xwin/fiber.sh` requires the rounding test to fail on both.
+ * and `suite/tools/xwin/fiber.sh` requires the rounding test to fail on both.
  */
 
 #include <stdint.h>

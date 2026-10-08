@@ -51,7 +51,7 @@ extern "C" {
  * publishes.  Appleby's reference does not promise this -- it reads and
  * writes in host order, so its own output is little-endian only by virtue of
  * where it is usually run.  Verified on s390x, powerpc64, powerpc and sparc64
- * as well as x86_64, i686 and aarch64; see tools/xarch in the workspace.
+ * as well as x86_64, i686 and aarch64; see suite/tools/xarch in the workspace.
  *
  * The consequence for `out`: it holds a defined little-endian byte string,
  * not a host integer.  Read it with `gcu_string_hash_32()` /
@@ -79,7 +79,7 @@ extern "C" {
  *
  * `gcu_string_hash_32()`, by contrast, **is** stable everywhere: there is only
  * one 32-bit variant, and since blocks are read little-endian it returns the
- * same value on all seven targets in the workspace's tools/xarch.  So does any
+ * same value on all seven targets in the workspace's suite/tools/xarch.  So does any
  * direct call to the three `gcu_string_murmur3_*` functions.  A caller who
  * needs a hash that survives leaving the process already has one; what they do
  * not have is a 64-bit helper that promises it.

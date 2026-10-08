@@ -193,7 +193,7 @@ defect.
 | --- | --- | --- |
 | `NO_MXCSR` | the rounding test | `double` and `MXCSR` probes wrong on every round, `fegetround` and `long double` right |
 | `NO_X87CW` | the rounding test | `fegetround` and `long double` wrong on every round, `double` and `MXCSR` right |
-| `NO_FPCR` (arm64) | `tools/xarch/fiber.sh` under qemu-user | rounding checks fail |
+| `NO_FPCR` (arm64) | `suite/tools/xarch/fiber.sh` under qemu-user | rounding checks fail |
 | `NO_CALLEE_SAVED` | `CalleeSavedRegistersSurviveSwitchesInBothDirections` (x86-64: r12 is not saved; arm64: x28), and the same check in `fiber-check.c` | one register of the resumer or the fiber changes across a switch; on x86-64 the plain suite then crashes later, which the gate does not need |
 | `NO_ASAN` | ASan, `detect_stack_use_after_return=0` | `stack-buffer-underflow` in a frame the exception had skipped |
 | `NO_ASAN`, default options | ASan prints a warning, exit 0 | see below |
@@ -209,7 +209,7 @@ both modes.
 ## 5. Known gaps
 
 - The sanitizers do not run under qemu-user, so arm64 has a functional gate
-  (`tools/xarch/fiber.sh`) and no sanitizer gate.
+  (`suite/tools/xarch/fiber.sh`) and no sanitizer gate.
 - On Windows only wine has run this.  Windows x64 also makes XMM6-XMM15
 non-volatile; the arm relies on `SwitchToFiber` to keep them and **no test
 measures that**.

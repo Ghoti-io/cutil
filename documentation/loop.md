@@ -234,7 +234,7 @@ found and the code now says:
 - `ConnectEx` wants the socket bound first, so a socket that was not is bound
   to the wildcard address.
 
-It is verified under wine (`tools/xwin/loop.sh`) and has not run on a Windows
+It is verified under wine (`suite/tools/xwin/loop.sh`) and has not run on a Windows
 machine.
 
 ## 5. What the gates are
@@ -246,6 +246,6 @@ loop (the test waits in the OS with no timeout, so the hang guard names it), a
 cancel that reports before the loop has let go of the buffer (a test that the
 callback has not run when cancel returns, and an AddressSanitizer run that
 frees the buffer in the completion and then sends data) and a timer queue
-ordered by start.  `tools/xwin/loop.sh` and `tools/xarch/loop.sh` plant the
+ordered by start.  `suite/tools/xwin/loop.sh` and `suite/tools/xarch/loop.sh` plant the
 same defects against the Windows arm and the aarch64 build.  The measurements
 and what was found are in `notes/cutil/event-loop.md`.
