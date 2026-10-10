@@ -23,7 +23,8 @@
  *
  * A thread pool: worker threads drawing tasks from a shared FIFO queue.  The
  * worker count is chosen at creation and changed with
- * gcu_pool_set_thread_count().
+ * gcu_pool_set_thread_count().  GCU_Managed_Pool adds a manager thread so any
+ * caller, including a worker, can request a new count without joining.
  *
  * The design and the reasoning behind each decision are recorded in
  * `documentation/thread-pool.md`.
@@ -403,6 +404,238 @@ GCU_API bool gcu_pool_is_inline(const GCU_Pool * pool);
  * @return `true` once shutdown has been requested, and for a `NULL` pool.
  */
 GCU_API bool gcu_pool_is_shutting_down(const GCU_Pool * pool);
+
+/**
+ * A pool plus the thread that resizes and tears it down.
+ *
+ * The layout is published only so that a caller may embed one and use the
+ * `_in_place` calls.  **Every field is private.**  The inner pool is not
+ * exposed, and its fields are not readable from here.
+ */
+typedef struct GCU_Managed_Pool GCU_Managed_Pool;
+
+/// @cond HIDDEN_SYMBOLS
+struct GCU_Managed_Pool {
+  const GCU_Allocator * allocator; ///< Private.  Allocator for this object.
+  GCU_Pool * inner;                ///< Private.  The pool the manager owns.
+  GCU_Thread manager;              ///< Private.  Not a worker of `inner`.
+  GCU_Semaphore wake;              ///< Private.  Counting wakeup.  A post
+                                   ///<   during an apply stays counted.
+  GCU_MUTEX_T state;               ///< Private.  Covers desired and stop.
+  size_t desired;                  ///< Private.  Last stored request.
+  int stop;                        ///< Private.  Non-zero once stop is
+                                   ///<   requested.  Destroy and abandon
+                                   ///<   share this word with desired.
+};
+/// @endcond
+
+/**
+ * Create a managed pool on the heap and start its workers and its manager.
+ *
+ * Does not return until the inner pool is up at the requested count, or
+ * until the call has failed and left no thread running.  A `NULL` config
+ * selects the same default as gcu_pool_create(), and the stored desired
+ * count is #GCU_POOL_THREADS_AUTO.  `thread_count == 0` is refused: inline
+ * mode is not a managed pool.
+ *
+ * @param config The configuration, or `NULL` for every default.
+ * @return The pool, or `NULL` on failure.  Destroy it with
+ *   gcu_managed_pool_destroy().
+ */
+GCU_API GCU_Managed_Pool * gcu_managed_pool_create(
+  const GCU_Pool_Config * config);
+
+/**
+ * Create a managed pool in memory the caller owns.
+ *
+ * @param pool Storage for the pool.  Must not be `NULL`.
+ * @param config The configuration, or `NULL` for every default.
+ * @return `true` on success.  On failure the storage is left zeroed and
+ *   safe to pass to gcu_managed_pool_destroy_in_place().
+ */
+GCU_API bool gcu_managed_pool_create_in_place(
+  GCU_Managed_Pool * pool, const GCU_Pool_Config * config);
+
+/**
+ * Run every queued task, stop the workers, and free the pool.
+ *
+ * Sets stop, wakes the manager, and joins it.  The manager finishes the
+ * resize it is already inside, then destroys the inner pool.  A shrink in
+ * progress therefore holds this call until that shrink's queue is empty.
+ *
+ * **A worker of this pool must not call this.**  It joins the manager, and
+ * the manager joins the workers.  Passing `NULL` does nothing.
+ *
+ * @param pool The pool to drain and destroy.
+ */
+GCU_API void gcu_managed_pool_destroy(GCU_Managed_Pool * pool);
+
+/**
+ * As gcu_managed_pool_destroy(), for a pool created in place.
+ *
+ * @param pool The pool to drain and tear down.
+ */
+GCU_API void gcu_managed_pool_destroy_in_place(GCU_Managed_Pool * pool);
+
+/**
+ * Discard the queued tasks, stop the workers, and free the pool.
+ *
+ * Sets stop, wakes the manager, and joins it.  The manager finishes the
+ * resize it is already inside, then abandons the inner pool.  A shrink in
+ * progress runs until its queue is empty; abandon then discards what is
+ * queued after that.  A task already running still runs.
+ *
+ * **A worker of this pool must not call this.**  Passing `NULL` does
+ * nothing.
+ *
+ * @param pool The pool to abandon and destroy.
+ */
+GCU_API void gcu_managed_pool_abandon(GCU_Managed_Pool * pool);
+
+/**
+ * As gcu_managed_pool_abandon(), for a pool created in place.
+ *
+ * @param pool The pool to abandon and tear down.
+ */
+GCU_API void gcu_managed_pool_abandon_in_place(GCU_Managed_Pool * pool);
+
+/**
+ * Record a new worker count and wake the manager.
+ *
+ * Stores the count, then posts the manager's semaphore, and returns.  `true`
+ * means the request was stored and the post succeeded.  It does not mean the
+ * live count has changed.  A later request replaces one that has not been
+ * applied.  #GCU_POOL_THREADS_AUTO is stored as itself and resolved when the
+ * manager applies it.
+ *
+ * A shrink the manager is already inside holds the manager until that
+ * shrink's queue is empty.  This call does not wait for either.
+ *
+ * @param pool The pool.
+ * @param thread_count The count to store.  `0` is refused and does not
+ *   replace the stored count.
+ * @return `false` if @p pool is `NULL`, @p thread_count is `0`, the post
+ *   fails, or stop has already been requested.  `true` when the request is
+ *   recorded.
+ */
+GCU_API bool gcu_managed_pool_set_thread_count(
+  GCU_Managed_Pool * pool, size_t thread_count);
+
+/**
+ * The count last stored by create or gcu_managed_pool_set_thread_count().
+ *
+ * An observation.  #GCU_POOL_THREADS_AUTO stays that value until a later
+ * request replaces it.  A failed apply does not change it.
+ *
+ * @param pool The pool.
+ * @return The stored request, or `0` if @p pool is `NULL`.
+ */
+GCU_API size_t gcu_managed_pool_desired_thread_count(
+  const GCU_Managed_Pool * pool);
+
+/**
+ * Enqueue a task without blocking.
+ *
+ * Forwards to the inner pool and keeps that pool's contract.
+ *
+ * @param pool The pool.
+ * @param task The task.  Must not be `NULL`.
+ * @param ctx The context pointer to hand the task.
+ * @return As gcu_pool_enqueue().
+ */
+GCU_API bool gcu_managed_pool_enqueue(
+  GCU_Managed_Pool * pool, GCU_Pool_Task task, void * ctx);
+
+/**
+ * Enqueue a task with a completion callback, without blocking.
+ *
+ * @param pool The pool.
+ * @param task The task.  Must not be `NULL`.
+ * @param ctx The context pointer to hand the task.
+ * @param on_complete Called after the task returns, or `NULL`.
+ * @param user_data Passed to @p on_complete.
+ * @return As gcu_pool_enqueue_cb().
+ */
+GCU_API bool gcu_managed_pool_enqueue_cb(GCU_Managed_Pool * pool,
+  GCU_Pool_Task task, void * ctx, GCU_Pool_Complete on_complete,
+  void * user_data);
+
+/**
+ * Enqueue a task, waiting for room if the queue is bounded and full.
+ *
+ * Forwards to the inner pool.  **Never call this from a task running on
+ * this pool.**
+ *
+ * @param pool The pool.
+ * @param task The task.  Must not be `NULL`.
+ * @param ctx The context pointer to hand the task.
+ * @return As gcu_pool_enqueue_wait().
+ */
+GCU_API bool gcu_managed_pool_enqueue_wait(
+  GCU_Managed_Pool * pool, GCU_Pool_Task task, void * ctx);
+
+/**
+ * As gcu_managed_pool_enqueue_wait(), with a completion callback.
+ *
+ * @param pool The pool.
+ * @param task The task.  Must not be `NULL`.
+ * @param ctx The context pointer to hand the task.
+ * @param on_complete Called after the task returns, or `NULL`.
+ * @param user_data Passed to @p on_complete.
+ * @return As gcu_pool_enqueue_wait_cb().
+ */
+GCU_API bool gcu_managed_pool_enqueue_wait_cb(GCU_Managed_Pool * pool,
+  GCU_Pool_Task task, void * ctx, GCU_Pool_Complete on_complete,
+  void * user_data);
+
+/**
+ * Block until the queue is empty and no task is running.
+ *
+ * @param pool The pool.
+ * @return As gcu_pool_wait().
+ */
+GCU_API int gcu_managed_pool_wait(GCU_Managed_Pool * pool);
+
+/**
+ * Forget the recorded first error.
+ *
+ * @param pool The pool.
+ */
+GCU_API void gcu_managed_pool_clear_error(GCU_Managed_Pool * pool);
+
+/**
+ * The number of tasks waiting to start.
+ *
+ * @param pool The pool.
+ * @return As gcu_pool_count_queued().
+ */
+GCU_API size_t gcu_managed_pool_count_queued(const GCU_Managed_Pool * pool);
+
+/**
+ * The number of tasks currently running.
+ *
+ * @param pool The pool.
+ * @return As gcu_pool_count_active().
+ */
+GCU_API size_t gcu_managed_pool_count_active(const GCU_Managed_Pool * pool);
+
+/**
+ * The number of worker threads.
+ *
+ * The manager is not a worker and is not included.  An observation.
+ *
+ * @param pool The pool.
+ * @return As gcu_pool_count_threads().
+ */
+GCU_API size_t gcu_managed_pool_count_threads(const GCU_Managed_Pool * pool);
+
+/**
+ * Whether teardown of the inner pool has begun.
+ *
+ * @param pool The pool.
+ * @return As gcu_pool_is_shutting_down().
+ */
+GCU_API bool gcu_managed_pool_is_shutting_down(const GCU_Managed_Pool * pool);
 
 #ifdef __cplusplus
 }

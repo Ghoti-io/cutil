@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <thread>
 #include <vector>
@@ -1595,6 +1596,733 @@ TEST(Pool, SetThreadCountAllocationFailureLeavesTheCountUnchanged) {
   EXPECT_EQ(0, gcu_pool_wait(pool));
   EXPECT_EQ(1, g_ran.load());
   guard.destroy();
+}
+
+namespace {
+
+/// Tears a managed pool down however the test ends.
+struct ManagedGuard {
+  GCU_Managed_Pool * pool;
+
+  explicit ManagedGuard(GCU_Managed_Pool * p) : pool(p) {}
+  ManagedGuard(const ManagedGuard &) = delete;
+  ManagedGuard & operator=(const ManagedGuard &) = delete;
+
+  void destroy() {
+    gcu_managed_pool_destroy(pool);
+    pool = nullptr;
+  }
+
+  void abandon() {
+    gcu_managed_pool_abandon(pool);
+    pool = nullptr;
+  }
+
+  void release() {
+    pool = nullptr;
+  }
+
+  ~ManagedGuard() {
+    if (pool) {
+      gcu_managed_pool_abandon(pool);
+    }
+  }
+};
+
+/// Opens every gate and releases every allocator stall this test armed.
+///
+/// Declared after ManagedGuard so it runs first on the way out.  A failed
+/// assert must not leave the manager blocked in a stall or a worker blocked
+/// on a gate, or the guard's join hangs.
+struct ReleaseFirst {
+  Gate * gate;
+  std::atomic<bool> * release_calloc;
+  std::atomic<bool> * release_free;
+
+  ~ReleaseFirst() {
+    if (release_calloc) {
+      release_calloc->store(true);
+    }
+    if (release_free) {
+      release_free->store(true);
+    }
+    if (gate) {
+      gate->open.store(true);
+    }
+  }
+};
+
+struct HookAlloc {
+  std::atomic<int> stall_calloc{0};
+  std::atomic<bool> release_calloc{false};
+  std::atomic<bool> calloc_done{false};
+  std::atomic<bool> fail_calloc{false};
+  std::atomic<int> stall_free{0};
+  std::atomic<bool> release_free{false};
+};
+
+void * hook_malloc(void *, size_t size) {
+  return std::malloc(size ? size : 1);
+}
+
+void * hook_calloc(void * ctx, size_t nitems, size_t size) {
+  HookAlloc * hook = static_cast<HookAlloc *>(ctx);
+  bool stalled = false;
+  if (hook->stall_calloc.load() == 1) {
+    stalled = true;
+    hook->stall_calloc.store(2);
+    while (!hook->release_calloc.load()) {
+      gcu_thread_yield();
+    }
+  }
+  void * block = nullptr;
+  if (!hook->fail_calloc.load()) {
+    if (nitems == 0 || size == 0) {
+      block = std::calloc(1, 1);
+    }
+    else {
+      block = std::calloc(nitems, size);
+    }
+  }
+  if (stalled) {
+    hook->calloc_done.store(true);
+  }
+  return block;
+}
+
+void * hook_realloc(void *, void * ptr, size_t size) {
+  return std::realloc(ptr, size ? size : 1);
+}
+
+void hook_free(void * ctx, void * ptr) {
+  HookAlloc * hook = static_cast<HookAlloc *>(ctx);
+  if (hook->stall_free.load() == 1) {
+    hook->stall_free.store(2);
+    while (!hook->release_free.load()) {
+      gcu_thread_yield();
+    }
+    hook->stall_free.store(0);
+  }
+  std::free(ptr);
+}
+
+GCU_Allocator hook_allocator(HookAlloc * hook) {
+  GCU_Allocator allocator = {};
+  allocator.ctx = hook;
+  allocator.malloc_fn = hook_malloc;
+  allocator.calloc_fn = hook_calloc;
+  allocator.realloc_fn = hook_realloc;
+  allocator.free_fn = hook_free;
+  return allocator;
+}
+
+int add_task(void * ctx) {
+  static_cast<std::atomic<int> *>(ctx)->fetch_add(1);
+  return 0;
+}
+
+struct ManagedResize {
+  GCU_Managed_Pool * pool;
+  GCU_Thread id;
+  bool accepted;
+};
+
+int managed_resize_task(void * ctx) {
+  ManagedResize * arg = static_cast<ManagedResize *>(ctx);
+  arg->id = gcu_thread_get_current_id();
+  arg->accepted = gcu_managed_pool_set_thread_count(arg->pool, 4);
+  return 0;
+}
+
+struct CompleteProbe {
+  std::atomic<int> ran{0};
+  std::atomic<int> completed{0};
+  std::atomic<int> status{-1};
+};
+
+int complete_task(void * ctx) {
+  static_cast<CompleteProbe *>(ctx)->ran.fetch_add(1);
+  return 7;
+}
+
+void complete_cb(void * ctx, int status, void * user_data) {
+  (void)ctx;
+  CompleteProbe * probe = static_cast<CompleteProbe *>(user_data);
+  probe->status.store(status);
+  probe->completed.fetch_add(1);
+}
+
+bool bytes_are_zero(const void * memory, size_t size) {
+  const unsigned char * bytes = static_cast<const unsigned char *>(memory);
+  for (size_t i = 0; i < size; ++i) {
+    if (bytes[i] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+#if defined(__linux__)
+/// Runs as the queued work a shrink must finish, then tries to enqueue once
+/// abandon has taken over.  The later enqueue is the work abandon discards.
+struct AfterShrink {
+  GCU_Managed_Pool * pool;
+  std::atomic<bool> * started;
+  std::atomic<int> * after_ran;
+  bool accepted;
+};
+
+int after_shrink_task(void * ctx) {
+  AfterShrink * arg = static_cast<AfterShrink *>(ctx);
+  arg->started->store(true);
+  while (!gcu_managed_pool_is_shutting_down(arg->pool)) {
+    gcu_thread_yield();
+  }
+  arg->accepted = gcu_managed_pool_enqueue(
+    arg->pool, add_task, arg->after_ran);
+  return 0;
+}
+
+int process_thread_count() {
+  FILE * file = std::fopen("/proc/self/status", "re");
+  if (!file) {
+    return -1;
+  }
+  char line[256];
+  int count = -1;
+  while (std::fgets(line, sizeof line, file)) {
+    int value = 0;
+    if (std::sscanf(line, "Threads: %d", &value) == 1) {
+      count = value;
+      break;
+    }
+  }
+  std::fclose(file);
+  return count;
+}
+#endif
+
+} // namespace
+
+//
+// Managed pool.  The manager is the only caller of resize and teardown, so a
+// worker can request a new count without being joined by that request.
+//
+
+TEST(ManagedPool, CreateStartsAtTheRequestedCount) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 4;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  EXPECT_EQ(4u, gcu_managed_pool_count_threads(pool));
+  EXPECT_EQ(4u, gcu_managed_pool_desired_thread_count(pool));
+  EXPECT_FALSE(gcu_managed_pool_is_shutting_down(pool));
+  guard.destroy();
+}
+
+TEST(ManagedPool, CreateDefaultStoresAutoAndUsesTheProcessorCount) {
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(NULL);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  EXPECT_EQ(GCU_POOL_THREADS_AUTO,
+    gcu_managed_pool_desired_thread_count(pool));
+  EXPECT_EQ(gcu_thread_get_num_processors(),
+    gcu_managed_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(ManagedPool, CreateRefusesZeroAndLeavesNoThread) {
+#if defined(__linux__)
+  int before = process_thread_count();
+  ASSERT_GT(before, 0);
+#endif
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 0;
+  EXPECT_EQ(nullptr, gcu_managed_pool_create(&config));
+
+  GCU_Managed_Pool storage;
+  std::memset(&storage, 0xab, sizeof storage);
+  EXPECT_FALSE(gcu_managed_pool_create_in_place(&storage, &config));
+  EXPECT_TRUE(bytes_are_zero(&storage, sizeof storage));
+  gcu_managed_pool_destroy_in_place(&storage);
+
+#if defined(__linux__)
+  EXPECT_EQ(before, process_thread_count());
+#endif
+}
+
+TEST(ManagedPool, InPlaceDestroyJoinsTheWorkers) {
+  GCU_Managed_Pool storage;
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  ASSERT_TRUE(gcu_managed_pool_create_in_place(&storage, &config));
+
+  Gate gate;
+  GCU_Thread ids[2] = {};
+  std::atomic<size_t> filled{0};
+  IdGate arg{&gate, ids, &filled};
+  ReleaseFirst release{&gate, nullptr, nullptr};
+
+  bool queued = gcu_managed_pool_enqueue(&storage, id_gate_task, &arg)
+    && gcu_managed_pool_enqueue(&storage, id_gate_task, &arg);
+  bool inside = until([&] {
+    return gcu_managed_pool_count_active(&storage) == 2;
+  });
+  gate.open.store(true);
+  ASSERT_TRUE(queued);
+  ASSERT_TRUE(inside);
+  EXPECT_EQ(0, gcu_managed_pool_wait(&storage));
+
+  gcu_managed_pool_destroy_in_place(&storage);
+
+  for (GCU_Thread id : ids) {
+    bool joined = false;
+    ASSERT_EQ(0, gcu_thread_is_joined(id, &joined));
+    EXPECT_TRUE(joined);
+  }
+}
+
+TEST(ManagedPool, SetRecordsResizeWhileManagerIsInsideShrink) {
+  HookAlloc hook;
+  GCU_Allocator allocator = hook_allocator(&hook);
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+  ReleaseFirst release{nullptr, nullptr, &hook.release_free};
+
+  hook.stall_free.store(1);
+  bool shrink_requested = gcu_managed_pool_set_thread_count(pool, 1);
+  bool blocked = until([&] {
+    return hook.stall_free.load() == 2;
+  });
+  size_t shrink_target = blocked ? gcu_managed_pool_count_threads(pool) : 0;
+  bool recorded = false;
+  size_t live_at_return = 0;
+  size_t desired = 0;
+  if (blocked) {
+    recorded = gcu_managed_pool_set_thread_count(pool, 4);
+    live_at_return = gcu_managed_pool_count_threads(pool);
+    desired = gcu_managed_pool_desired_thread_count(pool);
+  }
+  hook.release_free.store(true);
+  // Staying at the shrink target after the manager is free to run is a
+  // missed wakeup: the post during the shrink has to be applied.
+  bool applied = blocked && until([&] {
+    return gcu_managed_pool_count_threads(pool) == 4;
+  });
+
+  ASSERT_TRUE(shrink_requested);
+  ASSERT_TRUE(blocked);
+  ASSERT_EQ(1u, shrink_target);
+  ASSERT_TRUE(recorded);
+  ASSERT_EQ(1u, live_at_return);
+  ASSERT_EQ(4u, desired);
+  ASSERT_TRUE(applied);
+  guard.destroy();
+}
+
+TEST(ManagedPool, SetFromAWorkerDoesNotJoinThatWorker) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  ManagedResize arg{pool, 0, false};
+  ASSERT_TRUE(gcu_managed_pool_enqueue(pool, managed_resize_task, &arg));
+  EXPECT_EQ(0, gcu_managed_pool_wait(pool));
+
+  bool joined = true;
+  ASSERT_EQ(0, gcu_thread_is_joined(arg.id, &joined));
+  bool reached = until([&] {
+    return gcu_managed_pool_count_threads(pool) == 4;
+  });
+
+  EXPECT_TRUE(arg.accepted);
+  EXPECT_FALSE(joined);
+  ASSERT_TRUE(reached);
+  guard.destroy();
+}
+
+TEST(ManagedPool, SetCallsWhileShrinkIsInProgressCoalesce) {
+  HookAlloc hook;
+  GCU_Allocator allocator = hook_allocator(&hook);
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+  ReleaseFirst release{nullptr, nullptr, &hook.release_free};
+
+  hook.stall_free.store(1);
+  bool shrink_requested = gcu_managed_pool_set_thread_count(pool, 1);
+  bool blocked = until([&] {
+    return hook.stall_free.load() == 2;
+  });
+  bool first = false;
+  bool second = false;
+  bool third = false;
+  size_t desired = 0;
+  if (blocked) {
+    first = gcu_managed_pool_set_thread_count(pool, 3);
+    second = gcu_managed_pool_set_thread_count(pool, 6);
+    third = gcu_managed_pool_set_thread_count(pool, 4);
+    desired = gcu_managed_pool_desired_thread_count(pool);
+  }
+  hook.release_free.store(true);
+  bool applied = blocked && until([&] {
+    return gcu_managed_pool_count_threads(pool) == 4;
+  });
+
+  ASSERT_TRUE(shrink_requested);
+  ASSERT_TRUE(blocked);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(third);
+  ASSERT_EQ(4u, desired);
+  ASSERT_TRUE(applied);
+  guard.destroy();
+}
+
+TEST(ManagedPool, SetRefusesZeroWithoutChangingTheStoredCount) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  EXPECT_FALSE(gcu_managed_pool_set_thread_count(pool, 0));
+  EXPECT_EQ(2u, gcu_managed_pool_desired_thread_count(pool));
+  EXPECT_EQ(2u, gcu_managed_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(ManagedPool, SetAutoStaysAutoAndResolvesToTheProcessorCount) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  ASSERT_TRUE(gcu_managed_pool_set_thread_count(pool, GCU_POOL_THREADS_AUTO));
+  EXPECT_EQ(GCU_POOL_THREADS_AUTO,
+    gcu_managed_pool_desired_thread_count(pool));
+  bool resolved = until([&] {
+    return gcu_managed_pool_count_threads(pool)
+      == gcu_thread_get_num_processors();
+  });
+  ASSERT_TRUE(resolved);
+  guard.destroy();
+}
+
+TEST(ManagedPool, GrowAllocationFailureDoesNotSpinAndDestroyReturns) {
+  HookAlloc hook;
+  GCU_Allocator allocator = hook_allocator(&hook);
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+  ReleaseFirst release{nullptr, &hook.release_calloc, nullptr};
+
+  hook.fail_calloc.store(true);
+  hook.stall_calloc.store(1);
+  bool recorded = gcu_managed_pool_set_thread_count(pool, 4);
+  bool entered = until([&] {
+    return hook.stall_calloc.load() == 2;
+  });
+  size_t live = gcu_managed_pool_count_threads(pool);
+  size_t desired = gcu_managed_pool_desired_thread_count(pool);
+  hook.release_calloc.store(true);
+  bool failed = entered && until([&] {
+    return hook.calloc_done.load();
+  });
+
+  guard.release();
+  std::atomic<bool> destroyed{false};
+  std::thread joiner([&] {
+    gcu_managed_pool_destroy(pool);
+    destroyed.store(true);
+  });
+  bool returned = until([&] {
+    return destroyed.load();
+  });
+  joiner.join();
+
+  ASSERT_TRUE(recorded);
+  ASSERT_TRUE(entered);
+  ASSERT_TRUE(failed);
+  EXPECT_EQ(2u, live);
+  EXPECT_EQ(4u, desired);
+  ASSERT_TRUE(returned);
+}
+
+TEST(ManagedPool, FailedApplyRetriesWhenTheSameCountIsSetAgain) {
+  HookAlloc hook;
+  GCU_Allocator allocator = hook_allocator(&hook);
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+  ReleaseFirst release{nullptr, &hook.release_calloc, nullptr};
+
+  hook.fail_calloc.store(true);
+  hook.stall_calloc.store(1);
+  bool recorded = gcu_managed_pool_set_thread_count(pool, 4);
+  bool entered = until([&] {
+    return hook.stall_calloc.load() == 2;
+  });
+  hook.release_calloc.store(true);
+  bool failed = entered && until([&] {
+    return hook.calloc_done.load();
+  });
+  size_t live_after_failure = gcu_managed_pool_count_threads(pool);
+  hook.fail_calloc.store(false);
+  bool retried = failed && gcu_managed_pool_set_thread_count(pool, 4);
+  bool reached = retried && until([&] {
+    return gcu_managed_pool_count_threads(pool) == 4;
+  });
+
+  ASSERT_TRUE(recorded);
+  ASSERT_TRUE(entered);
+  ASSERT_TRUE(failed);
+  EXPECT_EQ(2u, live_after_failure);
+  EXPECT_EQ(4u, gcu_managed_pool_desired_thread_count(pool));
+  ASSERT_TRUE(retried);
+  ASSERT_TRUE(reached);
+  guard.destroy();
+}
+
+TEST(ManagedPool, SetRefusesNull) {
+  EXPECT_FALSE(gcu_managed_pool_set_thread_count(NULL, 4));
+  EXPECT_EQ(0u, gcu_managed_pool_desired_thread_count(NULL));
+  gcu_managed_pool_destroy(NULL);
+  gcu_managed_pool_abandon(NULL);
+  gcu_managed_pool_destroy_in_place(NULL);
+  gcu_managed_pool_abandon_in_place(NULL);
+}
+
+TEST(ManagedPool, EnqueueRunsAndWaitReturnsZero) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  std::atomic<int> ran{0};
+  ASSERT_TRUE(gcu_managed_pool_enqueue(pool, add_task, &ran));
+  EXPECT_EQ(0, gcu_managed_pool_wait(pool));
+  EXPECT_EQ(1, ran.load());
+
+  CompleteProbe probe;
+  ASSERT_TRUE(gcu_managed_pool_enqueue_cb(
+    pool, complete_task, &probe, complete_cb, &probe));
+  EXPECT_EQ(7, gcu_managed_pool_wait(pool));
+  EXPECT_EQ(1, probe.ran.load());
+  EXPECT_EQ(1, probe.completed.load());
+  EXPECT_EQ(7, probe.status.load());
+  gcu_managed_pool_clear_error(pool);
+  EXPECT_EQ(0, gcu_managed_pool_wait(pool));
+
+  ASSERT_TRUE(gcu_managed_pool_enqueue_wait(pool, add_task, &ran));
+  EXPECT_EQ(0, gcu_managed_pool_wait(pool));
+  EXPECT_EQ(2, ran.load());
+  guard.destroy();
+}
+
+TEST(ManagedPool, DestroyReturnsAfterWorkersAreJoined) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  Gate gate;
+  GCU_Thread ids[2] = {};
+  std::atomic<size_t> filled{0};
+  IdGate arg{&gate, ids, &filled};
+  ReleaseFirst release{&gate, nullptr, nullptr};
+
+  bool queued = gcu_managed_pool_enqueue(pool, id_gate_task, &arg)
+    && gcu_managed_pool_enqueue(pool, id_gate_task, &arg);
+  bool inside = until([&] {
+    return gcu_managed_pool_count_active(pool) == 2;
+  });
+  if (!queued || !inside) {
+    gate.open.store(true);
+    FAIL() << "workers never occupied the gate";
+  }
+
+  guard.release();
+  std::atomic<bool> destroyed{false};
+  std::thread joiner([&] {
+    gcu_managed_pool_destroy(pool);
+    destroyed.store(true);
+  });
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  bool finished_early = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (destroyed.load()) {
+      finished_early = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  gate.open.store(true);
+  joiner.join();
+
+  ASSERT_FALSE(finished_early);
+  ASSERT_TRUE(destroyed.load());
+  for (GCU_Thread id : ids) {
+    bool joined = false;
+    ASSERT_EQ(0, gcu_thread_is_joined(id, &joined));
+    EXPECT_TRUE(joined);
+  }
+}
+
+TEST(ManagedPool, AbandonSkipsQueuedWorkAndFinishesRunningWork) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  Gate gate;
+  std::atomic<int> running{0};
+  std::atomic<int> queued_ran{0};
+  GateCount held{&gate, &running};
+  ReleaseFirst release{&gate, nullptr, nullptr};
+
+  bool held_task = gcu_managed_pool_enqueue(pool, gate_count_task, &held);
+  bool busy = until([&] {
+    return gcu_managed_pool_count_active(pool) == 1;
+  });
+  bool queued = busy && gcu_managed_pool_enqueue(pool, add_task, &queued_ran);
+  size_t waiting = queued ? gcu_managed_pool_count_queued(pool) : 0;
+
+  guard.release();
+  std::atomic<bool> abandoned{false};
+  std::thread joiner([&] {
+    gcu_managed_pool_abandon(pool);
+    abandoned.store(true);
+  });
+  bool stopping = until([&] {
+    return gcu_managed_pool_is_shutting_down(pool);
+  });
+  int queued_at_stop = queued_ran.load();
+  gate.open.store(true);
+  joiner.join();
+
+  ASSERT_TRUE(held_task);
+  ASSERT_TRUE(busy);
+  ASSERT_TRUE(queued);
+  EXPECT_GT(waiting, 0u);
+  ASSERT_TRUE(stopping);
+  EXPECT_EQ(0, queued_at_stop);
+  EXPECT_EQ(0, queued_ran.load());
+  EXPECT_EQ(1, running.load());
+  ASSERT_TRUE(abandoned.load());
+}
+
+TEST(ManagedPool, AbandonDuringShrinkFinishesQueuedWorkFirst) {
+  HookAlloc hook;
+  GCU_Allocator allocator = hook_allocator(&hook);
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Managed_Pool * pool = gcu_managed_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  ManagedGuard guard(pool);
+
+  OneGate slots[2];
+  struct OpenSlots {
+    OneGate * slots;
+    std::atomic<bool> * release_calloc;
+    ~OpenSlots() {
+      release_calloc->store(true);
+      slots[0].open.store(true);
+      slots[1].open.store(true);
+    }
+  } open{slots, &hook.release_calloc};
+
+  bool queued = gcu_managed_pool_enqueue(pool, one_gate_task, &slots[0])
+    && gcu_managed_pool_enqueue(pool, one_gate_task, &slots[1]);
+  bool held = until([&] {
+    return slots[0].entered.load() && slots[1].entered.load()
+      && gcu_managed_pool_count_active(pool) == 2;
+  });
+
+  std::atomic<bool> started{false};
+  std::atomic<int> after_ran{0};
+  AfterShrink after{pool, &started, &after_ran, true};
+  bool shrink_work = held
+    && gcu_managed_pool_enqueue(pool, after_shrink_task, &after);
+  bool waiting = shrink_work && until([&] {
+    return gcu_managed_pool_count_queued(pool) >= 1;
+  });
+
+  hook.stall_calloc.store(1);
+  bool shrink_requested = waiting && gcu_managed_pool_set_thread_count(pool, 1);
+  bool inside = shrink_requested && until([&] {
+    return hook.stall_calloc.load() == 2;
+  });
+  size_t still_queued = inside ? gcu_managed_pool_count_queued(pool) : 0;
+
+  std::thread joiner;
+  if (inside) {
+    guard.release();
+    joiner = std::thread([&] {
+      gcu_managed_pool_abandon(pool);
+    });
+  }
+  hook.release_calloc.store(true);
+  // One worker leaves its gate and runs the queued task.  The other stays,
+  // so the surplus worker cannot exit and the shrink cannot finish yet.
+  slots[0].open.store(true);
+  bool ran_shrink_work = inside && until([&] {
+    return started.load();
+  });
+  slots[1].open.store(true);
+  if (joiner.joinable()) {
+    joiner.join();
+  }
+
+  ASSERT_TRUE(queued);
+  ASSERT_TRUE(held);
+  ASSERT_TRUE(shrink_work);
+  ASSERT_TRUE(waiting);
+  ASSERT_TRUE(shrink_requested);
+  ASSERT_TRUE(inside);
+  EXPECT_GE(still_queued, 1u);
+  ASSERT_TRUE(ran_shrink_work);
+  // The task tried to enqueue only after shutdown was visible.  That work
+  // is what abandon discards: it was not run.
+  EXPECT_FALSE(after.accepted);
+  EXPECT_EQ(0, after_ran.load());
 }
 
 int main(int argc, char** argv) {

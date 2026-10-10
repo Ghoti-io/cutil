@@ -261,6 +261,25 @@ queued. Create, enqueue, wait, and destroy keep their meaning. Shutdown stays
 one wakeup per live worker and a join of every worker still listed, and it is
 not interlocked with the resize.
 
+That join is why a worker of the pool cannot resize it: the caller would join
+itself. `GCU_Managed_Pool` is the pool plus a manager thread, and the manager
+is the only caller of `gcu_pool_set_thread_count`, `gcu_pool_destroy`, and
+`gcu_pool_abandon` on the inner pool. Any other thread, including a worker,
+records a desired count with `gcu_managed_pool_set_thread_count`. The call
+stores the count, posts a counting semaphore, and returns; it does not wait
+until the live count changes, and no call is offered that does. A later
+request replaces one the manager has not applied. `GCU_POOL_THREADS_AUTO` is
+stored as itself and resolved when the manager applies it. A shrink already
+in progress still holds the manager until that shrink's queue is empty, so an
+abandon requested during the shrink runs the queued work first and only then
+discards what is queued afterwards. Destroy and abandon set the same stop
+word, wake the manager on that same semaphore, and join it. A worker must not
+call either: they join the manager, and the manager joins the workers. The
+manager is named `gcu-mgr` and is not a worker, so
+`gcu_managed_pool_count_threads` does not include it. A failed apply is not
+retried until a later `gcu_managed_pool_set_thread_count` posts, including a
+repeat of the same count.
+
 ---
 
 ## 7. Decision 5: no task cancellation in v1
@@ -332,6 +351,41 @@ GCU_API size_t gcu_pool_count_active(const GCU_Pool * pool);
 GCU_API size_t gcu_pool_count_threads(const GCU_Pool * pool);
 GCU_API bool   gcu_pool_is_inline(const GCU_Pool * pool);
 GCU_API bool   gcu_pool_is_shutting_down(const GCU_Pool * pool);
+
+// Managed pool.  The manager thread is the only caller of resize, destroy,
+// and abandon on the inner pool.  See Decision 4.
+typedef struct GCU_Managed_Pool GCU_Managed_Pool;
+
+GCU_API GCU_Managed_Pool * gcu_managed_pool_create(
+  const GCU_Pool_Config * config);
+GCU_API bool gcu_managed_pool_create_in_place(
+  GCU_Managed_Pool * pool, const GCU_Pool_Config * config);
+GCU_API void gcu_managed_pool_destroy(GCU_Managed_Pool * pool);
+GCU_API void gcu_managed_pool_destroy_in_place(GCU_Managed_Pool * pool);
+GCU_API void gcu_managed_pool_abandon(GCU_Managed_Pool * pool);
+GCU_API void gcu_managed_pool_abandon_in_place(GCU_Managed_Pool * pool);
+GCU_API bool gcu_managed_pool_set_thread_count(
+  GCU_Managed_Pool * pool, size_t thread_count);
+GCU_API size_t gcu_managed_pool_desired_thread_count(
+  const GCU_Managed_Pool * pool);
+
+// The rest forward to the inner pool and keep its contracts.
+GCU_API bool gcu_managed_pool_enqueue(
+  GCU_Managed_Pool * pool, GCU_Pool_Task task, void * ctx);
+GCU_API bool gcu_managed_pool_enqueue_cb(GCU_Managed_Pool * pool,
+  GCU_Pool_Task task, void * ctx, GCU_Pool_Complete on_complete,
+  void * user_data);
+GCU_API bool gcu_managed_pool_enqueue_wait(
+  GCU_Managed_Pool * pool, GCU_Pool_Task task, void * ctx);
+GCU_API bool gcu_managed_pool_enqueue_wait_cb(GCU_Managed_Pool * pool,
+  GCU_Pool_Task task, void * ctx, GCU_Pool_Complete on_complete,
+  void * user_data);
+GCU_API int gcu_managed_pool_wait(GCU_Managed_Pool * pool);
+GCU_API void gcu_managed_pool_clear_error(GCU_Managed_Pool * pool);
+GCU_API size_t gcu_managed_pool_count_queued(const GCU_Managed_Pool * pool);
+GCU_API size_t gcu_managed_pool_count_active(const GCU_Managed_Pool * pool);
+GCU_API size_t gcu_managed_pool_count_threads(const GCU_Managed_Pool * pool);
+GCU_API bool gcu_managed_pool_is_shutting_down(const GCU_Managed_Pool * pool);
 ```
 
 Every name is added to `include/ghoti.io/cutil/namespace.h`, as the
