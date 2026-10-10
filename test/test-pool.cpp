@@ -8,6 +8,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <csignal>
+#include <cstdio>
+#include <pthread.h>
+#endif
+
 using namespace std;
 
 namespace {
@@ -1283,6 +1289,166 @@ TEST(Pool, SetThreadCountJoinsALeaverBeforeTheShrinkReturns) {
   EXPECT_EQ(1u, gcu_pool_count_threads(pool));
   guard.destroy();
 }
+
+#if defined(__linux__)
+namespace {
+
+volatile sig_atomic_t g_retired_wait_interrupts = 0;
+
+// ThreadSanitizer does not order a signal handler with the pthread_kill that
+// delivered it, so the handler's sig_atomic_t and the test thread's look like
+// a race.  They are the interruption count and nothing else.
+#if defined(__SANITIZE_THREAD__)
+extern "C" void AnnotateBenignRaceSized(
+  const char * file, int line, const volatile void * address,
+  long size, const char * description);
+#endif
+
+extern "C" void gcu_test_retired_wait_interrupt(int) {
+  g_retired_wait_interrupts = g_retired_wait_interrupts + 1;
+}
+
+/// The first field of /proc/self/task/<tid>/syscall is the syscall the thread
+/// is inside, or -1 when it is in user code.
+bool read_task_syscall(uint32_t tid, long * number) {
+  char path[64];
+  std::snprintf(path, sizeof path, "/proc/self/task/%u/syscall", tid);
+  FILE * file = std::fopen(path, "re");
+  if (!file) {
+    return false;
+  }
+  long value = -1;
+  int got = std::fscanf(file, "%ld", &value);
+  std::fclose(file);
+  if (got != 1) {
+    return false;
+  }
+  *number = value;
+  return true;
+}
+
+/// True when `tid` stays inside one syscall across a few milliseconds.
+///
+/// A transient call such as the work-semaphore post does not last that long.
+/// The retired-semaphore wait does, while the workers are still on the gate.
+bool blocked_in_syscall(uint32_t tid, long * number) {
+  long first = -1;
+  if (!read_task_syscall(tid, &first) || first < 0) {
+    return false;
+  }
+  gcu_thread_sleep(5);
+  long second = -1;
+  if (!read_task_syscall(tid, &second) || second != first) {
+    return false;
+  }
+  *number = first;
+  return true;
+}
+
+} // namespace
+
+TEST(Pool, SetThreadCountShrinkRetriesAnInterruptedRetiredWait) {
+#if defined(__SANITIZE_THREAD__)
+  AnnotateBenignRaceSized(
+    __FILE__, __LINE__, &g_retired_wait_interrupts,
+    (long)sizeof g_retired_wait_interrupts,
+    "retired-wait interruption count");
+#endif
+  struct sigaction action = {};
+  action.sa_handler = gcu_test_retired_wait_interrupt;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;
+  struct sigaction previous = {};
+  ASSERT_EQ(0, sigaction(SIGUSR1, &action, &previous));
+  struct RestoreSignal {
+    struct sigaction previous;
+    ~RestoreSignal() { sigaction(SIGUSR1, &previous, nullptr); }
+  } restore{previous};
+
+  Gate gate;
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  bool queued = gcu_pool_enqueue(pool, gate_task, &gate)
+    && gcu_pool_enqueue(pool, gate_task, &gate);
+  bool held = until([&] {
+    return gcu_pool_count_active(pool) == 2;
+  });
+  if (!queued || !held) {
+    gate.open.store(true);
+    FAIL() << "workers never occupied the gate";
+  }
+
+  std::atomic<uint32_t> tid{0};
+  std::atomic<bool> finished{false};
+  bool accepted = false;
+  std::thread resizer([&] {
+    tid.store((uint32_t)gcu_thread_get_current_id());
+    accepted = gcu_pool_set_thread_count(pool, 1);
+    finished.store(true);
+  });
+
+  bool shrinking = until([&] {
+    if (finished.load() || tid.load() == 0) {
+      return false;
+    }
+    GCU_MUTEX_LOCK(pool->mutex);
+    bool retiring = pool->retire > 0;
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    return retiring;
+  });
+  if (!shrinking) {
+    gate.open.store(true);
+    resizer.join();
+    FAIL() << "shrink never asked a worker to leave";
+  }
+
+  // The gate still holds both workers, so the retired semaphore stays empty
+  // and the resizer cannot leave gcu_pool_wait_retired.  A syscall that is
+  // still the same one a few milliseconds later is that wait.
+  long blocked = -1;
+  bool waiting = until([&] {
+    if (finished.load()) {
+      return false;
+    }
+    return blocked_in_syscall(tid.load(), &blocked);
+  });
+
+  g_retired_wait_interrupts = 0;
+  bool signaled = false;
+  if (waiting && !finished.load()) {
+    signaled = pthread_kill(resizer.native_handle(), SIGUSR1) == 0;
+  }
+  // The handler is installed without SA_RESTART, so sem_wait returns EINTR
+  // and the shrink's retry loop waits again.  The call must still be inside
+  // that wait: a token was not taken, and a hard error would have returned.
+  bool delivered = signaled && until([&] {
+    return g_retired_wait_interrupts > 0 || finished.load();
+  }) && g_retired_wait_interrupts > 0 && !finished.load();
+
+  long again = -1;
+  bool retried = delivered && until([&] {
+    if (finished.load()) {
+      return false;
+    }
+    return blocked_in_syscall(tid.load(), &again) && again == blocked;
+  });
+
+  gate.open.store(true);
+  resizer.join();
+
+  ASSERT_TRUE(waiting);
+  ASSERT_TRUE(delivered);
+  ASSERT_TRUE(retried);
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(1u, gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+#endif
 
 TEST(Pool, SetThreadCountLeavesTheSameCountAlone) {
   GCU_Pool_Config config = {};
