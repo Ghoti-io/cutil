@@ -343,12 +343,18 @@ bool gcu_managed_pool_set_thread_count(GCU_Managed_Pool * pool,
     GCU_MUTEX_UNLOCK(pool->state);
     return false;
   }
-  pool->desired = thread_count;
-  GCU_MUTEX_UNLOCK(pool->state);
 
-  // The store is published before the post.  A post that lands while the
-  // manager is inside gcu_pool_set_thread_count stays counted.
-  return gcu_semaphore_signal(&pool->wake) == 0;
+  // Held across the post.  Releasing it first lets destroy join the manager
+  // and free the semaphore before the post runs.  A failed post puts the
+  // previous count back; the manager was not woken.
+  size_t previous = pool->desired;
+  pool->desired = thread_count;
+  bool posted = gcu_semaphore_signal(&pool->wake) == 0;
+  if (!posted) {
+    pool->desired = previous;
+  }
+  GCU_MUTEX_UNLOCK(pool->state);
+  return posted;
 }
 
 size_t gcu_managed_pool_desired_thread_count(const GCU_Managed_Pool * pool) {

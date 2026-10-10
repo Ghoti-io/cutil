@@ -1762,7 +1762,6 @@ bool bytes_are_zero(const void * memory, size_t size) {
   return true;
 }
 
-#if defined(__linux__)
 /// Runs as the queued work a shrink must finish, then tries to enqueue once
 /// abandon has taken over.  The later enqueue is the work abandon discards.
 struct AfterShrink {
@@ -1783,6 +1782,7 @@ int after_shrink_task(void * ctx) {
   return 0;
 }
 
+#if defined(__linux__)
 int process_thread_count() {
   FILE * file = std::fopen("/proc/self/status", "re");
   if (!file) {
@@ -2096,9 +2096,28 @@ TEST(ManagedPool, FailedApplyRetriesWhenTheSameCountIsSetAgain) {
     return hook.calloc_done.load();
   });
   size_t live_after_failure = gcu_managed_pool_count_threads(pool);
+  // A manager that retries a failed grow on its own would enter this stall
+  // without another set.  One that waits does not.
+  hook.release_calloc.store(false);
+  hook.stall_calloc.store(1);
   hook.fail_calloc.store(false);
-  bool retried = failed && gcu_managed_pool_set_thread_count(pool, 4);
-  bool reached = retried && until([&] {
+  auto retry_deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  bool spun = false;
+  while (std::chrono::steady_clock::now() < retry_deadline) {
+    if (hook.stall_calloc.load() == 2) {
+      spun = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  bool retried = failed && !spun
+    && gcu_managed_pool_set_thread_count(pool, 4);
+  bool entered_again = retried && until([&] {
+    return hook.stall_calloc.load() == 2;
+  });
+  hook.release_calloc.store(true);
+  bool reached = entered_again && until([&] {
     return gcu_managed_pool_count_threads(pool) == 4;
   });
 
@@ -2107,7 +2126,9 @@ TEST(ManagedPool, FailedApplyRetriesWhenTheSameCountIsSetAgain) {
   ASSERT_TRUE(failed);
   EXPECT_EQ(2u, live_after_failure);
   EXPECT_EQ(4u, gcu_managed_pool_desired_thread_count(pool));
+  EXPECT_FALSE(spun);
   ASSERT_TRUE(retried);
+  ASSERT_TRUE(entered_again);
   ASSERT_TRUE(reached);
   guard.destroy();
 }
@@ -2233,6 +2254,12 @@ TEST(ManagedPool, AbandonSkipsQueuedWorkAndFinishesRunningWork) {
     return gcu_managed_pool_is_shutting_down(pool);
   });
   int queued_at_stop = queued_ran.load();
+  bool refused = false;
+  size_t desired_at_stop = 0;
+  if (stopping) {
+    refused = !gcu_managed_pool_set_thread_count(pool, 4);
+    desired_at_stop = gcu_managed_pool_desired_thread_count(pool);
+  }
   gate.open.store(true);
   joiner.join();
 
@@ -2241,6 +2268,8 @@ TEST(ManagedPool, AbandonSkipsQueuedWorkAndFinishesRunningWork) {
   ASSERT_TRUE(queued);
   EXPECT_GT(waiting, 0u);
   ASSERT_TRUE(stopping);
+  EXPECT_TRUE(refused);
+  EXPECT_EQ(1u, desired_at_stop);
   EXPECT_EQ(0, queued_at_stop);
   EXPECT_EQ(0, queued_ran.load());
   EXPECT_EQ(1, running.load());
