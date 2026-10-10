@@ -8,7 +8,7 @@ where the code departs from the design as written.
 
 ## Purpose
 
-A thread pool that owns a fixed set of worker threads and a queue of tasks,
+A thread pool that owns worker threads and a queue of tasks,
 so that callers can hand off work without managing thread lifetimes
 themselves. It is the missing piece between `thread.h`, `mutex.h` and
 `semaphore.h`, all of which already ship, and the parallel work that the
@@ -33,8 +33,9 @@ deleted; section 12 records how that went and where it departed from the plan.
 
 **In scope.** A pool of N worker threads; an unbounded FIFO task queue;
 submitting a task; waiting for submitted work to finish; collecting the first
-error a task reported; orderly shutdown; an inline mode that runs tasks on the
-calling thread for deterministic testing.
+error a task reported; orderly shutdown; changing the worker count with
+`gcu_pool_set_thread_count()` (see *Decision 4*); an inline mode that runs
+tasks on the calling thread for deterministic testing.
 
 **Out of scope, deliberately.**
 
@@ -42,8 +43,6 @@ calling thread for deterministic testing.
   submission order regardless of completion order, and applies backpressure
   through a bounded capacity. That is a compression-specific concern layered
   *on top of* a pool, and it stays in `compress`.
-- **Dynamic resizing.** The pool's thread count is fixed at creation. See
-  *Decision 4*.
 - **Task cancellation.** See *Decision 5*.
 - **Work stealing, task priorities, task dependencies.** No caller in the
   suite needs them, and each would change the queue's shape.
@@ -174,7 +173,9 @@ addition should not block this one.
 semaphore, a worker cannot tell the two apart from the wakeup alone. It must
 decide by inspecting state under the mutex, and it must check the queue
 *before* it honors shutdown. Defect (a) above is exactly what happens when
-that order is reversed.
+that order is reversed. A resize also posts one `work` wakeup per worker that
+should leave, and the worker still checks the queue, then shutdown, then
+retire.
 
 ---
 
@@ -241,16 +242,24 @@ zero.
 
 ---
 
-## 6. Decision 4: the thread count is fixed at creation
+## 6. Decision 4: resizing does not live in the worker
 
 The C++ version's `setThreadCount()` leaked comparisons like
 `threads.size() > targetThreadCount` into the worker's wait predicate, into
 shutdown, and into the bookkeeping of which threads were alive. That is where
 much of its complexity, and its double thread registry, came from.
 
-No caller in the suite resizes a pool. The count is fixed at creation; if a
-caller wants a different size, it creates a different pool. Resizing can be
-added later behind a new call without changing anything specified here.
+`gcu_pool_set_thread_count()` is that later call. Growing starts workers on
+the same queue. Shrinking sets `retire` to how many workers should leave;
+only a worker that is leaving decrements it, and only after the queue has
+been checked and shutdown has not been requested. A shrink does not return
+while every worker is busy; it waits until each surplus worker has finished
+the task it is in and exited; queued tasks are taken before a worker exits,
+so a non-empty queue holds the call until that queue is empty; workers that
+remain may still be inside a task when the call returns. Queued tasks stay
+queued. Create, enqueue, wait, and destroy keep their meaning. Shutdown stays
+one wakeup per live worker and a join of every worker still listed, and it is
+not interlocked with the resize.
 
 ---
 
@@ -301,6 +310,7 @@ GCU_API void gcu_pool_destroy(GCU_Pool * pool);           // drains
 GCU_API void gcu_pool_destroy_in_place(GCU_Pool * pool);  // drains
 GCU_API void gcu_pool_abandon(GCU_Pool * pool);           // discards queue
 GCU_API void gcu_pool_abandon_in_place(GCU_Pool * pool);
+GCU_API bool gcu_pool_set_thread_count(GCU_Pool * pool, size_t thread_count);
 
 // Work.  The plain forms never block; the _wait forms block for a free slot
 // when the queue is bounded.  See Decision 6.
@@ -369,24 +379,30 @@ Every name is added to `include/ghoti.io/cutil/namespace.h`, as the
 ```c
 struct GCU_Pool {
   const GCU_Allocator * allocator;
-  size_t thread_count;
-  GCU_Thread * threads;          // thread_count entries, NULL when inline
   bool is_inline;
+  size_t max_queued;             // 0 = unbounded
+  char name_prefix[GCU_POOL_NAME_PREFIX_MAX + 1]; // copied at create
 
-  GCU_MUTEX_T mutex;             // covers every field below
+  GCU_MUTEX_T mutex;             // covers thread_count, threads, and below
+  size_t thread_count;           // 0 when inline
+  GCU_Thread * threads;          // thread_count entries, NULL when inline
+  size_t retire;                 // workers that should leave
+  GCU_Thread * retired_ids;      // ids published by leavers, or NULL
+  size_t retired;                // how many leavers have published
+
   GCU_Array queue;               // FIFO of GCU_Pool_Item, head index below
   size_t queue_head;             // index of next item to run
   size_t active;                 // tasks currently executing
   int first_error;               // first non-zero status seen
   bool shutting_down;            // no new work accepted
-  bool draining;                 // run out the queue before stopping
+  size_t waiters;                // threads blocked in gcu_pool_wait()
+  size_t slot_waiters;           // threads blocked in gcu_pool_enqueue_wait()
+  size_t in_flight;              // external threads inside the pool
 
-  size_t max_queued;             // 0 = unbounded
   GCU_Semaphore work;            // counts outstanding wakeups
   GCU_Semaphore idle;            // releases waiters when quiescent
   GCU_Semaphore slots;           // free queue slots; unused when unbounded
-  size_t waiters;                // threads blocked in gcu_pool_wait()
-  size_t slot_waiters;           // threads blocked in gcu_pool_enqueue_wait()
+  GCU_Semaphore retired_wake;    // posted when a leaver publishes its id
 };
 ```
 
@@ -405,9 +421,11 @@ mutex is held only for queue manipulation and counter updates - never across a
 task, a callback, or a semaphore wait - so contention is not a concern at the
 task granularity this pool is for.
 
-**`shutting_down` and `draining` are read under the mutex,** not as bare
-`bool`s, which removes the data race noted in *Prior Art* without needing
-`<stdatomic.h>` or a per-platform atomic shim.
+**`shutting_down` is read under the mutex,** not as a bare `bool`, which
+removes the data race noted in *Prior Art* without needing `<stdatomic.h>`
+or a per-platform atomic shim. There is no `draining` flag; see
+*Implementation notes*. `retire` is also read and decremented under the
+mutex, and only by a worker that is leaving.
 
 ### The worker loop
 
@@ -416,8 +434,12 @@ out rather than left to the implementation:
 
 ```
 loop:
-  wait(work)                      // one wakeup per queued task or shutdown
+  wait(work)                      // one wakeup per queued task, shutdown, or retire
   lock(mutex)
+    if this worker is not yet listed and named:
+      unlock(mutex)
+      if the wait returned 0: post the wakeup again
+      continue loop
     if queue is non-empty:
       pop a task; active += 1
       unlock(mutex)
@@ -432,15 +454,22 @@ loop:
     // queue is empty
     if shutting_down:
       unlock(mutex); return
+    if retire > 0:
+      retire -= 1; record this worker's id
+      unlock(mutex); signal(retired_wake); return
     unlock(mutex)
     continue loop                 // surplus wakeup; go back to sleep
 ```
 
-**The queue is always checked before shutdown is honored.** That single
-ordering is what makes drain correct and is the direct fix for defect (a).
-A worker stops only when the queue is empty *and* shutdown has been requested,
-so `gcu_pool_destroy` does not need to wait for the queue itself - it sets the
-state, wakes every worker, and joins, and the workers drain it on the way out.
+**The queue is always checked before shutdown is honored, and shutdown before
+`retire`.** That ordering is what makes drain correct and is the direct fix
+for defect (a). A worker stops for shutdown only when the queue is empty
+*and* shutdown has been requested, so `gcu_pool_destroy` does not need to
+wait for the queue itself - it sets the state, wakes every worker, and joins,
+and the workers drain it on the way out. A resize exit is taken only when the
+queue is empty and shutdown has not been requested. An id is stored in
+`threads` only after that worker has been named, and a worker does not pop
+until its id is there.
 
 `gcu_pool_abandon` clears the queue under the mutex *before* waking the
 workers, so they find it empty and exit. Abandon and drain therefore share one
@@ -525,7 +554,7 @@ two.
   `exit()`, takes the process with it - the same as any other C call.
 - `size_t` arithmetic on counts uses `safemath.h` where a caller-supplied
   value is involved, notably the initial capacity derived from
-  `thread_count`.
+  `thread_count` and the arrays a resize allocates.
 
 ---
 

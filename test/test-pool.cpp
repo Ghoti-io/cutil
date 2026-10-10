@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
@@ -102,6 +103,98 @@ struct Gate {
 int gate_task(void * ctx) {
   Gate * gate = (Gate *)ctx;
   while (!gate->open.load()) {
+    gcu_thread_yield();
+  }
+  return 0;
+}
+
+/// Gate task that also counts, so a resize test can tell the tasks apart from
+/// the ones it enqueues afterwards.
+struct GateCount {
+  Gate * gate;
+  std::atomic<int> * ran;
+};
+
+int gate_count_task(void * ctx) {
+  GateCount * arg = (GateCount *)ctx;
+  while (!arg->gate->open.load()) {
+    gcu_thread_yield();
+  }
+  arg->ran->fetch_add(1);
+  return 0;
+}
+
+/// Records the worker's id, then waits.  Four of these on four workers name
+/// every worker without reading the pool's private list.
+struct IdGate {
+  Gate * gate;
+  GCU_Thread * ids;
+  std::atomic<size_t> * filled;
+};
+
+int id_gate_task(void * ctx) {
+  IdGate * arg = (IdGate *)ctx;
+  size_t slot = arg->filled->fetch_add(1);
+  arg->ids[slot] = gcu_thread_get_current_id();
+  while (!arg->gate->open.load()) {
+    gcu_thread_yield();
+  }
+  return 0;
+}
+
+/// Spin until `pred` is true, or ten seconds pass.
+template <typename Pred>
+bool until(Pred pred) {
+  auto deadline = chrono::steady_clock::now() + chrono::seconds(10);
+  while (chrono::steady_clock::now() < deadline) {
+    if (pred()) {
+      return true;
+    }
+    this_thread::yield();
+  }
+  return pred();
+}
+
+/// Fails unless this worker's id is already in the pool's thread list.
+struct ListedOnEntry {
+  GCU_Pool * pool;
+  std::atomic<int> ran{0};
+  std::atomic<int> missing{0};
+};
+
+int listed_on_entry(void * ctx) {
+  ListedOnEntry * arg = (ListedOnEntry *)ctx;
+  GCU_Thread self = gcu_thread_get_current_id();
+  bool found = false;
+
+  GCU_MUTEX_LOCK(arg->pool->mutex);
+  for (size_t i = 0; i < arg->pool->thread_count; ++i) {
+    if (arg->pool->threads[i] == self) {
+      found = true;
+      break;
+    }
+  }
+  GCU_MUTEX_UNLOCK(arg->pool->mutex);
+
+  if (!found) {
+    arg->missing.fetch_add(1);
+  }
+  arg->ran.fetch_add(1);
+  return found ? 0 : 1;
+}
+
+/// One worker, one gate, so a shrink test can release them one at a time.
+struct OneGate {
+  std::atomic<bool> open{false};
+  GCU_Thread id{0};
+  std::atomic<bool> entered{false};
+};
+
+int one_gate_task(void * ctx) {
+  OneGate * slot = (OneGate *)ctx;
+  slot->id = gcu_thread_get_current_id();
+  slot->entered.store(true);
+  while (!slot->open.load()) {
     gcu_thread_yield();
   }
   return 0;
@@ -872,6 +965,469 @@ TEST(Pool, ShuttingDownIsReportedAfterTeardownBegins) {
   ASSERT_NE(nullptr, pool);
   PoolGuard guard(pool);
   EXPECT_FALSE(gcu_pool_is_shutting_down(pool));
+  guard.destroy();
+}
+
+//
+// Resizing.  The worker count is create-time unless this call changes it.
+// A shrink must not return while queued work remains, and a failed allocation
+// must not change the count.
+//
+
+TEST(Pool, SetThreadCountGrowsAndRunsTasksAtOnce) {
+  Gate gate;
+  std::atomic<int> ran{0};
+  GateCount arg{&gate, &ran};
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  bool queued = true;
+  for (int i = 0; i < 4; ++i) {
+    queued = queued && gcu_pool_enqueue(pool, gate_count_task, &arg);
+  }
+  bool grew = gcu_pool_set_thread_count(pool, 4);
+
+  bool inside = until([&] {
+    return gcu_pool_count_active(pool) == 4;
+  });
+  // A failed assert abandons the pool.  Open the gate first, or the join of
+  // a task still waiting on it hangs.
+  gate.open.store(true);
+
+  ASSERT_TRUE(queued);
+  ASSERT_TRUE(grew);
+  ASSERT_TRUE(inside);
+  EXPECT_EQ(4u, gcu_pool_count_threads(pool));
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  EXPECT_EQ(4, ran.load());
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountGrowListsTheWorkerBeforeItsTask) {
+  Gate gate;
+  ListedOnEntry listed{};
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+  listed.pool = pool;
+
+  // Hold the original worker so the tasks below run on the threads grow
+  // starts, which is the window where an id can still be unpublished.
+  bool held = gcu_pool_enqueue(pool, gate_task, &gate);
+  bool busy = until([&] {
+    return gcu_pool_count_active(pool) == 1;
+  });
+  bool queued = true;
+  if (held && busy) {
+    for (int i = 0; i < 3; ++i) {
+      queued = queued && gcu_pool_enqueue(pool, listed_on_entry, &listed);
+    }
+  }
+  bool grew = false;
+  bool ran = false;
+  if (queued && busy) {
+    grew = gcu_pool_set_thread_count(pool, 4);
+    ran = until([&] {
+      return listed.ran.load() == 3;
+    });
+  }
+  gate.open.store(true);
+
+  ASSERT_TRUE(held);
+  ASSERT_TRUE(busy);
+  ASSERT_TRUE(queued);
+  ASSERT_TRUE(grew);
+  ASSERT_TRUE(ran);
+  EXPECT_EQ(0, listed.missing.load());
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  guard.destroy();
+}
+
+struct GrownName {
+  GCU_Thread original;
+  std::atomic<int> newcomers{0};
+  std::atomic<int> bad{0};
+};
+
+int grown_name_task(void * ctx) {
+  GrownName * arg = (GrownName *)ctx;
+  GCU_Thread self = gcu_thread_get_current_id();
+  if (self == arg->original) {
+    return 0;
+  }
+
+  char name[64] = {0};
+  bool ok = gcu_thread_get_name(self, name, sizeof(name)) == 0
+    && strncmp(name, "gtestpl-", 8) == 0;
+  if (!ok) {
+    arg->bad.fetch_add(1);
+  }
+  arg->newcomers.fetch_add(1);
+  return ok ? 0 : 1;
+}
+
+int capture_id_task(void * ctx) {
+  *((GCU_Thread *)ctx) = gcu_thread_get_current_id();
+  return 0;
+}
+
+TEST(Pool, SetThreadCountGrowNamesNewWorkersWithTheCreatePrefix) {
+  GCU_Thread original = 0;
+  GrownName probe{};
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+  config.name_prefix = "gtestpl";
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  ASSERT_TRUE(gcu_pool_enqueue(pool, capture_id_task, &original));
+  ASSERT_EQ(0, gcu_pool_wait(pool));
+  ASSERT_NE(0u, original);
+  probe.original = original;
+
+  ASSERT_TRUE(gcu_pool_set_thread_count(pool, 4));
+  for (int i = 0; i < 16; ++i) {
+    ASSERT_TRUE(gcu_pool_enqueue(pool, grown_name_task, &probe));
+  }
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  EXPECT_GT(probe.newcomers.load(), 0);
+  EXPECT_EQ(0, probe.bad.load());
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountShrinksAnIdlePool) {
+  Gate gate;
+  GCU_Thread ids[4] = {};
+  std::atomic<size_t> filled{0};
+  IdGate arg{&gate, ids, &filled};
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 4;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(gcu_pool_enqueue(pool, id_gate_task, &arg));
+  }
+  bool inside = until([&] {
+    return gcu_pool_count_active(pool) == 4;
+  });
+  gate.open.store(true);
+  ASSERT_TRUE(inside);
+  ASSERT_EQ(0, gcu_pool_wait(pool));
+
+  ASSERT_TRUE(gcu_pool_set_thread_count(pool, 1));
+  EXPECT_EQ(1u, gcu_pool_count_threads(pool));
+
+  int left = 0;
+  int stayed = 0;
+  for (GCU_Thread id : ids) {
+    bool joined = false;
+    ASSERT_EQ(0, gcu_thread_is_joined(id, &joined));
+    if (joined) {
+      ++left;
+    }
+    else {
+      ++stayed;
+    }
+  }
+  EXPECT_EQ(3, left);
+  EXPECT_EQ(1, stayed);
+
+  g_ran.store(0);
+  ASSERT_TRUE(gcu_pool_enqueue(pool, count_task, NULL));
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  EXPECT_EQ(1, g_ran.load());
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountShrinksOnlyAfterQueuedTasksRun) {
+  Gate gate;
+  std::atomic<int> ran{0};
+  GateCount arg{&gate, &ran};
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 4;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(gcu_pool_enqueue(pool, gate_count_task, &arg));
+  }
+  bool inside = until([&] {
+    return gcu_pool_count_active(pool) == 4
+      && gcu_pool_count_queued(pool) == 4;
+  });
+  // Open before any assertion that can fail, once the resizer below exists.
+  // Until then a failed assertion must not leave the workers in the gate.
+  if (!inside) {
+    gate.open.store(true);
+    FAIL() << "workers never occupied the gate with a queue behind them";
+  }
+
+  std::atomic<bool> entered{false};
+  std::atomic<bool> finished{false};
+  bool accepted = false;
+  size_t queued_at_return = static_cast<size_t>(-1);
+  std::thread resizer([&] {
+    entered.store(true);
+    accepted = gcu_pool_set_thread_count(pool, 1);
+    // Sampled in this thread, at the return, so a drain that happens later
+    // cannot hide a return that left the queue non-empty.
+    queued_at_return = gcu_pool_count_queued(pool);
+    finished.store(true);
+  });
+
+  // The gate still holds every worker, so the call cannot finish.  retire is
+  // set under the pool mutex once the call is actually inside the shrink;
+  // that is what makes "queued > 0 while the call is in progress" observable
+  // rather than a sample taken before the call starts.
+  bool saw_queued = until([&] {
+    if (!entered.load() || finished.load()) {
+      return false;
+    }
+    GCU_MUTEX_LOCK(pool->mutex);
+    bool shrinking = pool->retire > 0;
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    return shrinking && gcu_pool_count_queued(pool) > 0;
+  });
+  // The call is inside the shrink and the gate still holds every worker.
+  // One more task has to be accepted and has to run.
+  bool extra = false;
+  if (saw_queued) {
+    extra = gcu_pool_enqueue(pool, gate_count_task, &arg);
+  }
+  gate.open.store(true);
+  resizer.join();
+
+  ASSERT_TRUE(saw_queued);
+  ASSERT_TRUE(extra);
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(0u, queued_at_return);
+  EXPECT_EQ(1u, gcu_pool_count_threads(pool));
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  EXPECT_EQ(9, ran.load());
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountJoinsALeaverBeforeTheShrinkReturns) {
+  OneGate slots[4];
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 4;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  bool queued = true;
+  for (OneGate & slot : slots) {
+    queued = queued && gcu_pool_enqueue(pool, one_gate_task, &slot);
+  }
+  bool held = until([&] {
+    for (OneGate & slot : slots) {
+      if (!slot.entered.load()) {
+        return false;
+      }
+    }
+    return gcu_pool_count_active(pool) == 4;
+  });
+  if (!queued || !held) {
+    for (OneGate & slot : slots) {
+      slot.open.store(true);
+    }
+    FAIL() << "workers never parked on their gates";
+  }
+
+  std::atomic<bool> finished{false};
+  bool accepted = false;
+  std::thread resizer([&] {
+    accepted = gcu_pool_set_thread_count(pool, 1);
+    finished.store(true);
+  });
+
+  // Release one worker.  It is the first that can leave, so a shrink that
+  // joins as it goes must have joined this id while the other three are
+  // still on their gates and the call has not returned.
+  slots[0].open.store(true);
+  bool joined_early = until([&] {
+    bool joined = false;
+    if (gcu_thread_is_joined(slots[0].id, &joined) != 0 || !joined) {
+      return false;
+    }
+    return !finished.load();
+  });
+  for (OneGate & slot : slots) {
+    slot.open.store(true);
+  }
+  resizer.join();
+
+  ASSERT_TRUE(joined_early);
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(1u, gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountLeavesTheSameCountAlone) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 3;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  EXPECT_TRUE(gcu_pool_set_thread_count(pool, 3));
+  EXPECT_EQ(3u, gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountAutoMatchesProcessorCount) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 1;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  EXPECT_TRUE(gcu_pool_set_thread_count(pool, GCU_POOL_THREADS_AUTO));
+  EXPECT_EQ(gcu_thread_get_num_processors(), gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountRefusesZero) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  EXPECT_FALSE(gcu_pool_set_thread_count(pool, 0));
+  EXPECT_EQ(2u, gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountRefusesAnInlinePool) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 0;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  EXPECT_FALSE(gcu_pool_set_thread_count(pool, 4));
+  EXPECT_TRUE(gcu_pool_is_inline(pool));
+  EXPECT_EQ(0u, gcu_pool_count_threads(pool));
+  guard.destroy();
+}
+
+TEST(Pool, SetThreadCountRefusesNull) {
+  EXPECT_FALSE(gcu_pool_set_thread_count(NULL, 4));
+}
+
+struct WorkerResize {
+  GCU_Pool * pool;
+  GCU_Thread id;
+  bool accepted;
+};
+
+int worker_resize_task(void * ctx) {
+  WorkerResize * arg = (WorkerResize *)ctx;
+  arg->id = gcu_thread_get_current_id();
+  arg->accepted = gcu_pool_set_thread_count(arg->pool, 4);
+  return 0;
+}
+
+TEST(Pool, SetThreadCountFromAWorkerIsRefused) {
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  WorkerResize arg{pool, 0, true};
+  ASSERT_TRUE(gcu_pool_enqueue(pool, worker_resize_task, &arg));
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+
+  EXPECT_FALSE(arg.accepted);
+  EXPECT_EQ(2u, gcu_pool_count_threads(pool));
+  bool joined = true;
+  ASSERT_EQ(0, gcu_thread_is_joined(arg.id, &joined));
+  EXPECT_FALSE(joined);
+  guard.destroy();
+}
+
+struct FailState {
+  std::atomic<bool> fail{false};
+};
+
+void * fail_malloc(void *, size_t size) {
+  return malloc(size ? size : 1);
+}
+
+void * fail_calloc(void * ctx, size_t nitems, size_t size) {
+  if (static_cast<FailState *>(ctx)->fail.load()) {
+    return nullptr;
+  }
+  if (nitems == 0 || size == 0) {
+    return calloc(1, 1);
+  }
+  return calloc(nitems, size);
+}
+
+void * fail_realloc(void *, void * ptr, size_t size) {
+  return realloc(ptr, size ? size : 1);
+}
+
+void fail_free(void *, void * ptr) {
+  free(ptr);
+}
+
+TEST(Pool, SetThreadCountAllocationFailureLeavesTheCountUnchanged) {
+  FailState state;
+  GCU_Allocator allocator = {};
+  allocator.ctx = &state;
+  allocator.malloc_fn = fail_malloc;
+  allocator.calloc_fn = fail_calloc;
+  allocator.realloc_fn = fail_realloc;
+  allocator.free_fn = fail_free;
+
+  GCU_Pool_Config config = {};
+  config.thread_count = 2;
+  config.allocator = &allocator;
+
+  GCU_Pool * pool = gcu_pool_create(&config);
+  ASSERT_NE(nullptr, pool);
+  PoolGuard guard(pool);
+
+  state.fail.store(true);
+  EXPECT_FALSE(gcu_pool_set_thread_count(pool, 4));
+  EXPECT_EQ(2u, gcu_pool_count_threads(pool));
+  EXPECT_FALSE(gcu_pool_set_thread_count(pool, 1));
+  EXPECT_EQ(2u, gcu_pool_count_threads(pool));
+
+  state.fail.store(false);
+  g_ran.store(0);
+  ASSERT_TRUE(gcu_pool_enqueue(pool, count_task, NULL));
+  EXPECT_EQ(0, gcu_pool_wait(pool));
+  EXPECT_EQ(1, g_ran.load());
   guard.destroy();
 }
 

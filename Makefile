@@ -390,7 +390,7 @@ CLANG := $(shell command -v clang 2>/dev/null)
 # Sources whose #ifdef _WIN32 bodies are parse-checked. Add a file here in
 # the same commit that gives it a Windows branch, or the branch ships
 # untokenised.
-WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c src/fiber.c src/socket.c src/loop.c
+WIN32_PARSE_SOURCES := src/cond.c src/once.c src/rwlock.c src/error.c src/tls.c src/env.c src/library.c src/filelock.c src/mmap.c src/subprocess.c src/fiber.c src/socket.c src/loop.c src/pool.c
 
 
 

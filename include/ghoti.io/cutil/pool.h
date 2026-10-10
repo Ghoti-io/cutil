@@ -21,8 +21,9 @@
 /**
  * @file
  *
- * A thread pool: a fixed set of worker threads drawing tasks from a shared
- * FIFO queue.
+ * A thread pool: worker threads drawing tasks from a shared FIFO queue.  The
+ * worker count is chosen at creation and changed with
+ * gcu_pool_set_thread_count().
  *
  * The design and the reasoning behind each decision are recorded in
  * `documentation/thread-pool.md`.
@@ -72,12 +73,20 @@ typedef struct GCU_Pool GCU_Pool;
 /// @cond HIDDEN_SYMBOLS
 struct GCU_Pool {
   const GCU_Allocator * allocator; ///< Private.  Allocator for all memory.
-  size_t thread_count;             ///< Private.  Worker count; 0 when inline.
-  GCU_Thread * threads;            ///< Private.  Worker ids, or NULL.
   bool is_inline;                  ///< Private.  Tasks run at enqueue time.
   size_t max_queued;               ///< Private.  Queue limit; 0 = unbounded.
+  /// Private.  Worker-name prefix copied at create.  New workers keep using
+  /// it across a resize.
+  char name_prefix[GCU_POOL_NAME_PREFIX_MAX + 1];
 
-  GCU_MUTEX_T mutex;               ///< Private.  Covers every field below.
+  GCU_MUTEX_T mutex;               ///< Private.  Covers thread_count, threads,
+                                   ///<   and every field below.
+  size_t thread_count;             ///< Private.  Worker count; 0 when inline.
+  GCU_Thread * threads;            ///< Private.  Worker ids, or NULL.
+  size_t retire;                   ///< Private.  Workers that should leave.
+  GCU_Thread * retired_ids;        ///< Private.  Ids published by leavers.
+  size_t retired;                  ///< Private.  How many leavers published.
+
   GCU_Array queue;                 ///< Private.  FIFO of queued tasks.
   size_t queue_head;               ///< Private.  Index of the next task.
   size_t active;                   ///< Private.  Tasks currently running.
@@ -92,6 +101,8 @@ struct GCU_Pool {
   GCU_Semaphore work;              ///< Private.  Outstanding worker wakeups.
   GCU_Semaphore idle;              ///< Private.  Releases waiters when idle.
   GCU_Semaphore slots;             ///< Private.  Free slots when bounded.
+  GCU_Semaphore retired_wake;      ///< Private.  Posted when a leaver
+                                   ///<   publishes its id.
 };
 /// @endcond
 
@@ -223,6 +234,41 @@ GCU_API void gcu_pool_abandon(GCU_Pool * pool);
  * @param pool The pool to abandon and tear down.
  */
 GCU_API void gcu_pool_abandon_in_place(GCU_Pool * pool);
+
+/**
+ * Change the number of worker threads.
+ *
+ * Growing starts workers on the same queue.  Shrinking retires surplus
+ * workers: each finishes its current task, exits on an empty queue, and this
+ * call joins those exits.  Queued tasks stay queued.  A shrink does not
+ * return while every worker is busy; it waits until each surplus worker has
+ * finished the task it is in and exited; queued tasks are taken before a
+ * worker exits, so a non-empty queue holds the call until that queue is
+ * empty; workers that remain may still be inside a task when the call
+ * returns.
+ *
+ * A worker exits for resize only after its current task returns, and only
+ * when it wakes to an empty queue.  It does not exit while a task is queued,
+ * and it does not take the resize exit once shutting down has been requested.
+ * Enqueue may proceed during the call.  A call from a worker of this pool
+ * returns `false` and leaves the count unchanged.  The call must not run
+ * concurrently with destroy, abandon, or another resize.  Inline mode is
+ * create-time only.
+ *
+ * @param pool The pool.
+ * @param thread_count The worker count to reach.  `0` is refused.
+ *   `GCU_POOL_THREADS_AUTO` is one worker per logical processor, never 0, as
+ *   at create.
+ * @return `true` when the count equals the requested count.
+ *   `GCU_POOL_THREADS_AUTO` succeeds at the processor count.  `false` if
+ *   @p pool is `NULL`, the pool is inline, @p thread_count is `0`, the caller
+ *   is a worker of this pool, or the count could not be reached.  A failed
+ *   allocation leaves the count unchanged.  A failed retired-semaphore wait
+ *   may already have joined some workers and reduced the count.  A failed
+ *   grow keeps the workers that started, and gcu_pool_count_threads() is the
+ *   count reached.
+ */
+GCU_API bool gcu_pool_set_thread_count(GCU_Pool * pool, size_t thread_count);
 
 /**
  * Enqueue a task without blocking.

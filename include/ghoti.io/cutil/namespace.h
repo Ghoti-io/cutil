@@ -300,6 +300,7 @@
 #define gcu_pool_is_shutting_down GHOTIIO_CUTIL(gcu_pool_is_shutting_down)
 #define GCU_Pool_Item GHOTIIO_CUTIL(GCU_Pool_Item)
 #define GCU_Pool_Task GHOTIIO_CUTIL(GCU_Pool_Task)
+#define gcu_pool_set_thread_count GHOTIIO_CUTIL(gcu_pool_set_thread_count)
 #define gcu_pool_wait GHOTIIO_CUTIL(gcu_pool_wait)
 #define GCU_Random GHOTIIO_CUTIL(GCU_Random)
 #define GCU_Random_Engine GHOTIIO_CUTIL(GCU_Random_Engine)

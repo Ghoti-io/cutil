@@ -27,6 +27,7 @@
  * `documentation/thread-pool.md`.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -123,24 +124,59 @@ static void gcu_pool_run(GCU_Pool * pool, GCU_Pool_Item * item) {
 }
 
 /**
+ * Whether the calling thread's id is in the published worker list.
+ *
+ * Must be called with the mutex held.  An id is published only after that
+ * worker has been named, so being listed is the dequeue gate for both.
+ */
+static bool gcu_pool_lists_current(const GCU_Pool * pool) {
+  GCU_Thread self = gcu_thread_get_current_id();
+
+  for (size_t i = 0; i < pool->thread_count; ++i) {
+    if (pool->threads[i] == self) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * The worker loop.
  *
- * The order of the two checks is the whole correctness argument: the queue is
- * examined *before* shutdown is honoured, so a worker woken by teardown still
- * drains whatever is waiting. Reversing them is what makes `compress` discard
- * queued jobs at destroy.
+ * The order of the checks is the whole correctness argument: the queue is
+ * examined *before* shutdown is honoured, and shutdown *before* `retire`, so
+ * a worker woken by teardown still drains whatever is waiting and does not
+ * take the resize exit once shutdown has been requested.  Reversing the first
+ * two is what makes `compress` discard queued jobs at destroy.  `retire` is a
+ * count of workers that should leave, decremented only by a worker that is
+ * leaving.  It is never a comparison against a target count.
  */
 static GCU_THREAD_FUNC_RETURN_T GCU_THREAD_FUNC_CALLING_CONVENTION
 gcu_pool_worker(GCU_THREAD_FUNC_ARG_T arg) {
   GCU_Pool * pool = (GCU_Pool *)arg;
 
   while (true) {
-    // One wakeup per enqueued task, plus one per worker at shutdown.  The two
-    // are indistinguishable here, which is why the decision below is made by
-    // looking at the queue rather than by trusting the wakeup.
-    gcu_semaphore_wait(&pool->work);
+    // One wakeup per enqueued task, plus one per worker at shutdown, plus one
+    // per worker a resize wants to retire.  They are indistinguishable here,
+    // which is why the decision below is made by looking at the queue rather
+    // than by trusting the wakeup.
+    int woke = gcu_semaphore_wait(&pool->work);
 
     GCU_MUTEX_LOCK(pool->mutex);
+
+    // The wrapper posts started, and gcu_thread_create returns from that post,
+    // before the wrapper calls this function.  This thread can still run
+    // before its id is published.  A wakeup consumed in that window is put
+    // back only when the wait took a token; the task stays queued for a
+    // worker that is allowed to take it.
+    if (!gcu_pool_lists_current(pool)) {
+      GCU_MUTEX_UNLOCK(pool->mutex);
+      if (woke == 0) {
+        gcu_semaphore_signal(&pool->work);
+      }
+      continue;
+    }
 
     if (pool->queue_head < pool->queue.count) {
       GCU_Pool_Item item =
@@ -176,6 +212,18 @@ gcu_pool_worker(GCU_THREAD_FUNC_ARG_T arg) {
       break;
     }
 
+    // Empty queue and shutdown not requested.  Leave only when this pool has
+    // asked someone to leave.  The id is published before the post, so the
+    // resizer can join it as soon as the post is observed.
+    if (pool->retire > 0) {
+      --pool->retire;
+      pool->retired_ids[pool->retired] = gcu_thread_get_current_id();
+      ++pool->retired;
+      GCU_MUTEX_UNLOCK(pool->mutex);
+      gcu_semaphore_signal(&pool->retired_wake);
+      break;
+    }
+
     // A surplus wakeup with nothing to do and no shutdown: go back to sleep.
     GCU_MUTEX_UNLOCK(pool->mutex);
   }
@@ -208,6 +256,12 @@ static void gcu_pool_shutdown(GCU_Pool * pool, bool discard_queue) {
 
   pool->shutting_down = true;
 
+  // Snapshot the list under the same lock that publishes it.  Resize is not
+  // interlocked with destroy; this is the list of workers still recorded, and
+  // the wakeups below are one per entry of it.
+  size_t live = pool->thread_count;
+  GCU_Thread * workers = pool->threads;
+
   if (discard_queue) {
     // Emptying the queue here, before the workers are woken, is the whole of
     // the difference between abandoning and draining: the workers then find
@@ -226,13 +280,14 @@ static void gcu_pool_shutdown(GCU_Pool * pool, bool discard_queue) {
   GCU_MUTEX_UNLOCK(pool->mutex);
 
   // One guaranteed wakeup each, so that every worker reaches the shutdown
-  // test even if the queue is empty.
-  for (size_t i = 0; i < pool->thread_count; ++i) {
+  // test even if the queue is empty.  Shutdown stays ahead of retire: a
+  // worker that sees shutting_down set does not take the resize exit.
+  for (size_t i = 0; i < live; ++i) {
     gcu_semaphore_signal(&pool->work);
   }
 
-  for (size_t i = 0; i < pool->thread_count; ++i) {
-    gcu_thread_join(pool->threads[i]);
+  for (size_t i = 0; i < live; ++i) {
+    gcu_thread_join(workers[i]);
   }
 
   // Release the sleepers in gcu_pool_wait().  Unconditionally, not through
@@ -289,8 +344,10 @@ static void gcu_pool_free_parts(GCU_Pool * pool) {
     if (pool->max_queued) {
       gcu_semaphore_destroy(&pool->slots);
     }
+    gcu_semaphore_destroy(&pool->retired_wake);
     gcu_semaphore_destroy(&pool->idle);
     gcu_semaphore_destroy(&pool->work);
+    gcu_allocator_free(pool->allocator, pool->retired_ids);
     gcu_allocator_free(pool->allocator, pool->threads);
   }
 
@@ -322,6 +379,10 @@ bool gcu_pool_create_in_place(
   pool->is_inline = requested == 0;
   pool->thread_count = pool->is_inline ? 0 : requested;
   pool->max_queued = config && !pool->is_inline ? config->max_queued : 0;
+  // Copied, so the caller's pointer need only be valid for this call, and a
+  // later grow still has the prefix.
+  snprintf(pool->name_prefix, sizeof(pool->name_prefix), "%.*s",
+    (int)GCU_POOL_NAME_PREFIX_MAX, prefix);
 
   if (GCU_MUTEX_CREATE(pool->mutex) != 0) {
     memset(pool, 0, sizeof(GCU_Pool));
@@ -373,11 +434,22 @@ bool gcu_pool_create_in_place(
     return false;
   }
 
+  if (gcu_semaphore_create(&pool->retired_wake, 0) != 0) {
+    gcu_semaphore_destroy(&pool->idle);
+    gcu_semaphore_destroy(&pool->work);
+    gcu_allocator_free(allocator, pool->threads);
+    gcu_array_destroy_in_place(&pool->queue);
+    GCU_MUTEX_DESTROY(pool->mutex);
+    memset(pool, 0, sizeof(GCU_Pool));
+    return false;
+  }
+
   if (pool->max_queued) {
     // A semaphore counts with an int, so a limit that will not fit cannot be
     // honoured and is refused rather than silently narrowed.
     if (pool->max_queued > (size_t)__INT_MAX__
         || gcu_semaphore_create(&pool->slots, (int)pool->max_queued) != 0) {
+      gcu_semaphore_destroy(&pool->retired_wake);
       gcu_semaphore_destroy(&pool->idle);
       gcu_semaphore_destroy(&pool->work);
       gcu_allocator_free(allocator, pool->threads);
@@ -389,7 +461,12 @@ bool gcu_pool_create_in_place(
   }
 
   for (size_t i = 0; i < pool->thread_count; ++i) {
-    if (gcu_thread_create(&pool->threads[i], gcu_pool_worker, pool) != 0) {
+    // Into a local, not threads[i].  The new thread has entered
+    // gcu_pool_worker before this returns, and it must not dequeue until the
+    // id is listed and the name has been applied.  thread_count is already
+    // the full count, so an unpublished slot stays 0 and does not match.
+    GCU_Thread id;
+    if (gcu_thread_create(&id, gcu_pool_worker, pool) != 0) {
       // Stop the workers that did start before unwinding, so that none of
       // them outlives the memory it is reading.
       size_t started = i;
@@ -410,7 +487,11 @@ bool gcu_pool_create_in_place(
       return false;
     }
 
-    gcu_pool_name_worker(pool->threads[i], prefix, i);
+    gcu_pool_name_worker(id, pool->name_prefix, i);
+
+    GCU_MUTEX_LOCK(pool->mutex);
+    pool->threads[i] = id;
+    GCU_MUTEX_UNLOCK(pool->mutex);
   }
 
   return true;
@@ -432,6 +513,252 @@ GCU_Pool * gcu_pool_create(const GCU_Pool_Config * config) {
   }
 
   return pool;
+}
+
+/**
+ * Drop published leavers out of the worker list.
+ *
+ * Must be called with the mutex held, after every leaver in `retired_ids`
+ * has been joined.
+ */
+static void gcu_pool_remove_retired(GCU_Pool * pool) {
+  size_t kept = 0;
+
+  for (size_t i = 0; i < pool->thread_count; ++i) {
+    bool gone = false;
+
+    for (size_t j = 0; j < pool->retired; ++j) {
+      if (pool->threads[i] == pool->retired_ids[j]) {
+        gone = true;
+        break;
+      }
+    }
+
+    if (!gone) {
+      pool->threads[kept++] = pool->threads[i];
+    }
+  }
+
+  pool->thread_count = kept;
+}
+
+/**
+ * Wait until one leaving worker has posted.
+ *
+ * A POSIX wait is restarted only when it fails with EINTR.  Any other
+ * failure, including a Windows wait that does not set errno, is final: the
+ * caller returns false instead of spinning.
+ */
+static bool gcu_pool_wait_retired(GCU_Pool * pool) {
+#ifdef _WIN32
+  return gcu_semaphore_wait(&pool->retired_wake) == 0;
+#else
+  for (;;) {
+    if (gcu_semaphore_wait(&pool->retired_wake) == 0) {
+      return true;
+    }
+    if (errno != EINTR) {
+      return false;
+    }
+  }
+#endif
+}
+
+/**
+ * Join any published leaver the caller has not joined yet, drop those ids
+ * from the worker list, and forget the retire request.
+ *
+ * Workers already joined stay joined.  Workers that have not published stay
+ * listed, so destroy still joins them.  `joined` is how many posts the caller
+ * has already consumed.
+ */
+static void gcu_pool_shrink_settle(GCU_Pool * pool, size_t joined) {
+  GCU_MUTEX_LOCK(pool->mutex);
+  size_t published = pool->retired;
+  // No further worker takes the resize exit.  Anyone already inside the
+  // retire section has published; that write happens in the same critical
+  // section as the decrement.
+  pool->retire = 0;
+  GCU_MUTEX_UNLOCK(pool->mutex);
+
+  for (size_t n = joined; n < published; ++n) {
+    GCU_Thread id;
+
+    GCU_MUTEX_LOCK(pool->mutex);
+    id = pool->retired_ids[n];
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    // Outside the mutex.  Joining here, before waiting on anyone else, is
+    // what keeps a reused thread id from meeting an unjoined record.
+    gcu_thread_join(id);
+  }
+
+  // Each of those joins returned only after its post.  Consume the posts the
+  // wait loop did not, so a later shrink does not observe a stale wakeup.
+  // A POSIX trywait that fails with EINTR did not take the permit; retry it.
+  // A Windows trywait does not set errno, so one attempt is the whole try.
+  for (size_t n = joined; n < published; ++n) {
+#ifdef _WIN32
+    gcu_semaphore_trywait(&pool->retired_wake);
+#else
+    for (;;) {
+      if (gcu_semaphore_trywait(&pool->retired_wake) == 0) {
+        break;
+      }
+      if (errno != EINTR) {
+        break;
+      }
+    }
+#endif
+  }
+
+  GCU_MUTEX_LOCK(pool->mutex);
+  gcu_pool_remove_retired(pool);
+  GCU_Thread * ids = pool->retired_ids;
+  pool->retired_ids = NULL;
+  pool->retired = 0;
+  pool->retire = 0;
+  GCU_MUTEX_UNLOCK(pool->mutex);
+  gcu_allocator_free(pool->allocator, ids);
+}
+
+/**
+ * Start workers until the pool has `target` of them.
+ *
+ * A thread is named and then published before it may dequeue.  If creating
+ * one fails, the workers already published stay published: the count reached
+ * is what gcu_pool_count_threads() reports, and this returns false.
+ */
+static bool gcu_pool_grow(GCU_Pool * pool, size_t target) {
+  size_t bytes;
+  if (!gcu_safe_mul_size(target, sizeof(GCU_Thread), &bytes)) {
+    return false;
+  }
+
+  GCU_Thread * bigger =
+    gcu_allocator_calloc(pool->allocator, target, sizeof(GCU_Thread));
+  if (!bigger) {
+    return false;
+  }
+
+  GCU_MUTEX_LOCK(pool->mutex);
+  size_t have = pool->thread_count;
+  memcpy(bigger, pool->threads, have * sizeof(GCU_Thread));
+  GCU_Thread * old = pool->threads;
+  pool->threads = bigger;
+  GCU_MUTEX_UNLOCK(pool->mutex);
+  gcu_allocator_free(pool->allocator, old);
+
+  for (size_t i = have; i < target; ++i) {
+    GCU_Thread id;
+
+    if (gcu_thread_create(&id, gcu_pool_worker, pool) != 0) {
+      return false;
+    }
+
+    gcu_pool_name_worker(id, pool->name_prefix, i);
+
+    GCU_MUTEX_LOCK(pool->mutex);
+    pool->threads[i] = id;
+    pool->thread_count = i + 1;
+    GCU_MUTEX_UNLOCK(pool->mutex);
+  }
+
+  return true;
+}
+
+/**
+ * Retire workers until `target` remain.
+ *
+ * The retired-id array is allocated before anything is asked to leave, so a
+ * failure there leaves the count unchanged.  Each leaver is joined as soon
+ * as its publication is observed, and only then does this wait for the next.
+ */
+static bool gcu_pool_shrink(GCU_Pool * pool, size_t target) {
+  size_t current = gcu_pool_count_threads(pool);
+  size_t surplus = current - target;
+  size_t bytes;
+
+  if (!gcu_safe_mul_size(surplus, sizeof(GCU_Thread), &bytes)) {
+    return false;
+  }
+
+  GCU_Thread * ids =
+    gcu_allocator_calloc(pool->allocator, surplus, sizeof(GCU_Thread));
+  if (!ids) {
+    return false;
+  }
+
+  GCU_MUTEX_LOCK(pool->mutex);
+  pool->retired_ids = ids;
+  pool->retired = 0;
+  pool->retire = surplus;
+  GCU_MUTEX_UNLOCK(pool->mutex);
+
+  // One wakeup per worker that should leave.  A wakeup spent on a queued
+  // task does not decrement retire; the extra post stays until the queue is
+  // empty, which is what holds this call open while work remains.
+  for (size_t i = 0; i < surplus; ++i) {
+    gcu_semaphore_signal(&pool->work);
+  }
+
+  for (size_t n = 0; n < surplus; ++n) {
+    if (!gcu_pool_wait_retired(pool)) {
+      gcu_pool_shrink_settle(pool, n);
+      return false;
+    }
+
+    GCU_Thread id;
+    GCU_MUTEX_LOCK(pool->mutex);
+    id = pool->retired_ids[n];
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    gcu_thread_join(id);
+  }
+
+  gcu_pool_shrink_settle(pool, surplus);
+
+  // The last surplus worker committed to leave only after it saw an empty
+  // queue.  Another thread can enqueue after that.  Wait until the queue is
+  // empty again before returning success.  Do not wait for active to reach
+  // zero: a worker that remains may still be inside a task.
+  for (;;) {
+    GCU_MUTEX_LOCK(pool->mutex);
+    bool empty = pool->queue_head == pool->queue.count;
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    if (empty) {
+      break;
+    }
+    gcu_thread_yield();
+  }
+
+  return true;
+}
+
+bool gcu_pool_set_thread_count(GCU_Pool * pool, size_t thread_count) {
+  if (!pool || !pool->allocator || pool->is_inline || thread_count == 0) {
+    return false;
+  }
+
+  size_t target = thread_count == GCU_POOL_THREADS_AUTO
+    ? gcu_thread_get_num_processors()
+    : thread_count;
+
+  GCU_MUTEX_LOCK(pool->mutex);
+  // A task on this pool must not join its own worker, or rewrite the list
+  // the grow below is filling in.
+  if (gcu_pool_lists_current(pool)) {
+    GCU_MUTEX_UNLOCK(pool->mutex);
+    return false;
+  }
+  size_t current = pool->thread_count;
+  GCU_MUTEX_UNLOCK(pool->mutex);
+
+  if (target == current) {
+    return true;
+  }
+
+  return target > current
+    ? gcu_pool_grow(pool, target)
+    : gcu_pool_shrink(pool, target);
 }
 
 void gcu_pool_destroy_in_place(GCU_Pool * pool) {
@@ -667,7 +994,19 @@ size_t gcu_pool_count_active(const GCU_Pool * pool) {
 }
 
 size_t gcu_pool_count_threads(const GCU_Pool * pool) {
-  return pool ? pool->thread_count : 0;
+  if (!pool || !pool->allocator) {
+    return 0;
+  }
+
+  // thread_count is written under the mutex by a resize.  Sampling it the
+  // same way the other counts are sampled keeps the reader correct across
+  // that update.
+  GCU_Pool * mutable_pool = (GCU_Pool *)pool;
+  GCU_MUTEX_LOCK(mutable_pool->mutex);
+  size_t result = pool->thread_count;
+  GCU_MUTEX_UNLOCK(mutable_pool->mutex);
+
+  return result;
 }
 
 bool gcu_pool_is_inline(const GCU_Pool * pool) {
