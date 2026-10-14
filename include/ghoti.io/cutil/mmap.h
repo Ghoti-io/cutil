@@ -98,7 +98,9 @@ typedef struct {
  * @param path The file, UTF-8.  Must exist; this never creates one.
  * @param writable true for a read-write mapping whose stores reach the file.
  *   The file is opened for writing, so this fails on a read-only file.
- * @return 0 on success, -1 on failure.
+ * @return 0 on success, -1 on failure.  A file too long for `size_t` (4 GiB
+ *   or more on a 32-bit build) is refused with `errno` set to `EFBIG` on
+ *   POSIX, and never mapped short.
  */
 GCU_API int gcu_mmap_open(GCU_Mapped_File * map, const char * path,
     bool writable);

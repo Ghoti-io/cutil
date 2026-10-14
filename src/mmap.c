@@ -142,7 +142,9 @@ int gcu_mmap_close(GCU_Mapped_File * map) {
 
 #else
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -190,6 +192,15 @@ int gcu_mmap_open(GCU_Mapped_File * map, const char * path, bool writable) {
     // spare descriptor is worth two states that cannot be confused.
     map->fd = fd;
     return 0;
+  }
+
+  // A file longer than size_t is refused.  Cast first, it would be mapped
+  // short -- a 5 GiB file as 1 byte on a 32-bit build -- and every caller
+  // would read a file that is not the one on disk.
+  if ((uint64_t)info.st_size > SIZE_MAX) {
+    close(fd);
+    errno = EFBIG;
+    return -1;
   }
 
   int protection = PROT_READ | (writable ? PROT_WRITE : 0);
