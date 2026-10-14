@@ -37,6 +37,24 @@
 #include <ghoti.io/cutil/file.h>
 #include <ghoti.io/cutil/macros.h>
 
+#if !defined(_WIN32) && !defined(__cplusplus)
+#include <sys/types.h>
+/* A 32-bit off_t makes readdir() fail with EOVERFLOW on an ext4 directory and
+ * fseeko() truncate an offset of 2 GiB or more.  The Makefile defines
+ * _FILE_OFFSET_BITS=64 (LFS_FLAGS); this refuses a build that did not. */
+_Static_assert(sizeof(off_t) == 8,
+  "build with -D_FILE_OFFSET_BITS=64 (LFS_FLAGS in the Makefile)");
+#endif
+
+/**
+ * An initialiser for a GCU_File_Info that is about to be filled by
+ * gcu_file_stat().  The function sets every member whenever it returns OK, but
+ * gcc 14 at -O2 on a 32-bit target cannot see that through the inlined
+ * wrapper and reports `type` as maybe-uninitialised, which -Werror turns into
+ * a build failure.
+ */
+#define GCU_FILE_INFO_INIT {GCU_FILE_TYPE_OTHER, 0, 0}
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -143,9 +143,14 @@ int gcu_mmap_close(GCU_Mapped_File * map) {
 #else
 
 #include <fcntl.h>
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* See file_internal.h: a 32-bit off_t makes fstat() refuse a large file. */
+_Static_assert(sizeof(off_t) == 8,
+  "build with -D_FILE_OFFSET_BITS=64 (LFS_FLAGS in the Makefile)");
 
 int gcu_mmap_open(GCU_Mapped_File * map, const char * path, bool writable) {
   if (!map || !path) {

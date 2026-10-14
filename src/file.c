@@ -972,7 +972,7 @@ bool gcu_file_exists(const char * path) {
 }
 
 bool gcu_file_is_directory(const char * path) {
-  GCU_File_Info info;
+  GCU_File_Info info = GCU_FILE_INFO_INIT;
   return gcu_file_stat(path, &info) == GCU_FILE_OK
       && info.type == GCU_FILE_TYPE_DIRECTORY;
 }
@@ -984,7 +984,7 @@ GCU_File_Result gcu_file_remove(const char * path) {
   // Refused rather than delegated: remove() on POSIX unlinks a file and also
   // removes an empty directory, so a caller who passed the wrong variable
   // would silently get the other operation.
-  GCU_File_Info info;
+  GCU_File_Info info = GCU_FILE_INFO_INIT;
   GCU_File_Result looked = gcu_file_stat_link(path, &info);
   if (looked != GCU_FILE_OK) {
     return looked;
@@ -1373,7 +1373,7 @@ GCU_File_Result gcu_file_set_mode(const char * path, uint32_t mode) {
    * attribute and report success, which is a mode this call did not set.
    * A missing path is still a missing path, so that failure is asked first. */
   (void)mode;
-  GCU_File_Info info;
+  GCU_File_Info info = GCU_FILE_INFO_INIT;
   GCU_File_Result looked = gcu_file_stat_link(path, &info);
   if (looked != GCU_FILE_OK) {
     return looked;

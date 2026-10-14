@@ -305,7 +305,7 @@ static void dir_type_by_asking(GCU_Dir * dir, const char * name,
   }
   if (gcu_path_join(GCU_PATH_NATIVE, dir->path, name, full, need + 1, NULL)
       == GCU_PATH_OK) {
-    GCU_File_Info info;
+    GCU_File_Info info = GCU_FILE_INFO_INIT;
     if (gcu_file_stat_link(full, &info) == GCU_FILE_OK) {
       *out_type = info.type;
     }

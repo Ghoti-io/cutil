@@ -122,14 +122,22 @@ OPT_CXXFLAGS := -O2
 SAN_OPT_CFLAGS := -O1
 endif
 
+# Large files on a 32-bit build.  Without this glibc's off_t and ino_t are 32
+# bits wide: readdir() fails with EOVERFLOW on a directory whose entries carry
+# 64-bit cookies (every ext4 directory), fseeko() truncates an offset of 2 GiB
+# or more, and stat() fails on a file it cannot describe.  On a 64-bit build
+# it changes nothing.  file.c, dir.c and mmap.c assert sizeof(off_t) == 8, so
+# a build that drops this fails to compile instead of failing at run time.
+LFS_FLAGS := -D_FILE_OFFSET_BITS=64
+
 CXX := g++
-CXXFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c++20 $(OPT_CXXFLAGS) -g $(EXTRA_CXXFLAGS)
+CXXFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c++20 $(LFS_FLAGS) $(OPT_CXXFLAGS) -g $(EXTRA_CXXFLAGS)
 CC := cc
 # GHOTIIO_CUTIL_BUILD enables DLL export on Windows (checked by GCU_API).
 # GHOTIIO_CUTIL_TEST_BUILD would export internals for testing (checked by
 # GCU_INTERNAL_API); it is deliberately not set here, so the shipped library
 # exports its public API and nothing else.
-CFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c17 $(OPT_CFLAGS) -g -fvisibility=hidden -DGHOTIIO_CUTIL_BUILD $(EXTRA_CFLAGS)
+CFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c17 $(LFS_FLAGS) $(OPT_CFLAGS) -g -fvisibility=hidden -DGHOTIIO_CUTIL_BUILD $(EXTRA_CFLAGS)
 # -DGHOTIIO_CUTIL_ENABLE_MEMORY_DEBUG
 LDFLAGS := -L /usr/lib -lstdc++ -lm $(EXTRA_LDFLAGS)
 
