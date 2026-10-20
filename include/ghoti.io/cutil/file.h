@@ -525,6 +525,25 @@ GCU_API GCU_File_Result gcu_file_flush(GCU_File_Handle * handle);
 GCU_API GCU_File_Result gcu_file_sync(GCU_File_Handle * handle);
 
 /**
+ * A handle onto a temporary file's open stream, for the calls above.
+ *
+ * ::gcu_file_temp_stream() gives back a `FILE *`, and plain stdio cannot seek
+ * past two gigabytes on 64-bit Windows.  This is the same stream seen as a
+ * handle, so ::gcu_file_seek(), ::gcu_file_tell(), ::gcu_file_read_bytes() and
+ * ::gcu_file_write_bytes() work on it with 64-bit offsets everywhere.
+ *
+ * **Borrowed, and never closed.**  The temporary still owns the stream.  Pass
+ * the view to ::gcu_file_close() and the later ::gcu_file_temp_commit() or
+ * ::gcu_file_temp_abort() closes it a second time.  The view stops being valid
+ * when the temporary is disposed of.
+ *
+ * @param temp The temporary.
+ * @return The view.  Its stream is NULL if @p temp is NULL or already disposed
+ *   of, and every call above refuses that handle with ::GCU_FILE_ERR_INVALID.
+ */
+GCU_API GCU_File_Handle gcu_file_temp_handle(const GCU_File_Temp * temp);
+
+/**
  * Ask the filesystem what is at a path.
  *
  * Follows symbolic links, so a link to a directory reports

@@ -159,6 +159,7 @@
 #define gcu_file_temp_abort GHOTIIO_CUTIL(gcu_file_temp_abort)
 #define gcu_file_temp_commit GHOTIIO_CUTIL(gcu_file_temp_commit)
 #define gcu_file_temp_create GHOTIIO_CUTIL(gcu_file_temp_create)
+#define gcu_file_temp_handle GHOTIIO_CUTIL(gcu_file_temp_handle)
 #define gcu_file_temp_path GHOTIIO_CUTIL(gcu_file_temp_path)
 #define gcu_file_temp_stream GHOTIIO_CUTIL(gcu_file_temp_stream)
 #define gcu_file_write_atomic GHOTIIO_CUTIL(gcu_file_write_atomic)

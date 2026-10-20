@@ -271,6 +271,37 @@ TEST_F(Scratch, TempCreateOpensAFileInTheDirectoryItWasGiven) {
   gcu_file_temp_abort(&temp);
 }
 
+TEST_F(Scratch, TempHandleSeeksAndWritesTheTemporarysOwnStream) {
+  GCU_File_Temp temp;
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_temp_create(&temp, dir.c_str(), "view", nullptr));
+  GCU_File_Handle view = gcu_file_temp_handle(&temp);
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&view, "abcdef", 6));
+  // Back over what was written, then forward again: what a writer does to
+  // fill in a header after the data that decided it.
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_seek(&view, 1, GCU_FILE_SEEK_SET));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&view, "XY", 2));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_seek(&view, 0, GCU_FILE_SEEK_END));
+  int64_t at = -1;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_tell(&view, &at));
+  EXPECT_EQ(6, at);
+  // The same stream, not a second one: the temporary's commit sees the patch.
+  string dest = dir + "/viewed";
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_temp_commit(&temp, dest.c_str(), GCU_FILE_SYNC_NONE,
+          GCU_FILE_PERMS_DEFAULT));
+  EXPECT_EQ("aXYdef", Read(dest).str());
+}
+
+TEST(FileTemp, TempHandleOfNothingIsRefusedByEveryCall) {
+  GCU_File_Handle view = gcu_file_temp_handle(nullptr);
+  EXPECT_EQ(nullptr, view.stream);
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_write_bytes(&view, "a", 1));
+  GCU_File_Temp spent{};
+  view = gcu_file_temp_handle(&spent);
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_seek(&view, 0, GCU_FILE_SEEK_SET));
+}
+
 TEST_F(Scratch, ManyLiveTemporariesWithOnePrefixAllGetTheirOwnName) {
   // mkstemp() draws six random characters and retries on a clash.  The
   // Windows arm once used _wmktemp_s, which fills the same six places with a

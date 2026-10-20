@@ -249,6 +249,13 @@ FILE * gcu_file_temp_stream(const GCU_File_Temp * temp) {
   return temp ? temp->stream : NULL;
 }
 
+GCU_File_Handle gcu_file_temp_handle(const GCU_File_Temp * temp) {
+  GCU_File_Handle handle;
+  handle.stream = temp ? temp->stream : NULL;
+  handle.allocator = temp ? temp->allocator : NULL;
+  return handle;
+}
+
 const char * gcu_file_temp_path(const GCU_File_Temp * temp) {
   return temp ? temp->path : NULL;
 }
