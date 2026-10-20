@@ -358,12 +358,17 @@ GCU_File_Result gcu_file_temp_create(GCU_File_Temp * temp, const char * dir,
     return GCU_FILE_ERR_IO;
   }
   char * chosen = gcu_path_internal_from_wide(allocator, wide);
-  gcu_allocator_free(allocator, wide);
   if (!chosen) {
+    // The file exists by now, so closing it is not enough: it has to go, and
+    // the wide name is what can still remove it. Found by archive's
+    // allocation sweep under wine, which left a file for this refusal.
     _close(fd);
+    DeleteFileW(wide);
+    gcu_allocator_free(allocator, wide);
     gcu_allocator_free(allocator, path);
     return GCU_FILE_ERR_OOM;
   }
+  gcu_allocator_free(allocator, wide);
   gcu_allocator_free(allocator, path);
   path = chosen;
   FILE * stream = _fdopen(fd, "w+b");

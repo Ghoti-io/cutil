@@ -329,6 +329,47 @@ TEST_F(Scratch, TempAbortRemovesTheFileEvenWhenItsAllocatorRefuses) {
   EXPECT_FALSE(exists(path));
 }
 
+TEST_F(Scratch, TempCreateThatRunsOutOfMemoryLeavesNoFile) {
+  // A refusal at each allocation in turn. Each one must leave the directory as
+  // it found it: on Windows the file is created before the last allocation, and
+  // an early return there once left it behind.
+  bool reached_ok = false;
+  for (int budget = 0; budget < 16; ++budget) {
+    SCOPED_TRACE(budget);
+    struct Counting {
+      int left;
+      GCU_Allocator allocator{};
+    } counting{budget, {}};
+    counting.allocator.ctx = &counting;
+    counting.allocator.malloc_fn = [](void * ctx, size_t size) -> void * {
+      Counting * self = static_cast<Counting *>(ctx);
+      return self->left-- > 0 ? malloc(size ? size : 1) : nullptr;
+    };
+    counting.allocator.calloc_fn = [](void * ctx, size_t n, size_t size) -> void * {
+      Counting * self = static_cast<Counting *>(ctx);
+      return self->left-- > 0 ? calloc(n ? n : 1, size ? size : 1) : nullptr;
+    };
+    counting.allocator.realloc_fn = [](void * ctx, void * ptr, size_t size) -> void * {
+      Counting * self = static_cast<Counting *>(ctx);
+      return self->left-- > 0 ? realloc(ptr, size ? size : 1) : nullptr;
+    };
+    counting.allocator.free_fn = [](void *, void * ptr) { free(ptr); };
+    GCU_File_Temp temp;
+    GCU_File_Result result = gcu_file_temp_create(
+        &temp, dir.c_str(), "sweep", &counting.allocator);
+    if (result == GCU_FILE_OK) {
+      reached_ok = true;
+      counting.left = 1000;
+      gcu_file_temp_abort(&temp);
+    }
+    else {
+      EXPECT_EQ(GCU_FILE_ERR_OOM, result);
+    }
+    EXPECT_TRUE(entries().empty());
+  }
+  EXPECT_TRUE(reached_ok);
+}
+
 TEST(FileTemp, TempHandleOfNothingIsRefusedByEveryCall) {
   GCU_File_Handle view = gcu_file_temp_handle(nullptr);
   EXPECT_EQ(nullptr, view.stream);
