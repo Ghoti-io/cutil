@@ -1017,6 +1017,7 @@ check-stamps: ## Check that every compile rule names its tree's flag stamp
 	     exit 1; }
 
 check-win32-parse: ## Parse-check the headers' Windows branches
+check-win32-parse: | $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
 	@printf "\n### Parse-checking Windows branches ###\n"
 ifeq ($(OS_NAME), Windows)
 	@printf "check-win32-parse: skipped (this is Windows; the real build compiled those branches)\n"
@@ -1031,6 +1032,7 @@ else
 endif
 
 check-win32-linkage: ## Check GCU_API's three Windows states
+check-win32-linkage: | $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/float.h $(BUILD_DIR)/include/$(SUITE)/$(PROJECT)/libver_gen.h
 	@printf "\n### Checking the Windows linkage states ###\n"
 	@# Three compilations of one file, one per state, because a translation
 	@# unit can only be in one of them.  Built into the scratch area rather
