@@ -525,6 +525,21 @@ GCU_API GCU_File_Result gcu_file_flush(GCU_File_Handle * handle);
 GCU_API GCU_File_Result gcu_file_sync(GCU_File_Handle * handle);
 
 /**
+ * Set the file's length.
+ *
+ * Shorter discards what is past @p length; longer extends it with zeroes.  The
+ * position is not moved, so a write after a truncation below it extends the
+ * file again from wherever the handle was.  Buffered output is flushed first,
+ * because flushing it later would write past the new end.
+ *
+ * @param handle The handle, open for writing.
+ * @param length The new length, in bytes.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_truncate(GCU_File_Handle * handle,
+  uint64_t length);
+
+/**
  * A handle onto a temporary file's open stream, for the calls above.
  *
  * ::gcu_file_temp_stream() gives back a `FILE *`, and plain stdio cannot seek

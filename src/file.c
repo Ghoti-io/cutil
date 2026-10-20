@@ -891,6 +891,27 @@ GCU_File_Result gcu_file_sync(GCU_File_Handle * handle) {
   return file_sync_stream(handle->stream) ? GCU_FILE_OK : GCU_FILE_ERR_IO;
 }
 
+GCU_File_Result gcu_file_truncate(GCU_File_Handle * handle, uint64_t length) {
+  if (!handle || !handle->stream || length > (uint64_t)INT64_MAX) {
+    return GCU_FILE_ERR_INVALID;
+  }
+  // Buffered bytes first: a later flush of them would write past the new end
+  // and grow the file again.
+  if (fflush(handle->stream) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+#ifdef _WIN32
+  if (_chsize_s(_fileno(handle->stream), (__int64)length) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+#else
+  if (ftruncate(fileno(handle->stream), (off_t)length) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+#endif
+  return GCU_FILE_OK;
+}
+
 /** Fill in @p out from a platform stat buffer. */
 #ifdef _WIN32
 static void file_info_from_find(GCU_File_Info * out,

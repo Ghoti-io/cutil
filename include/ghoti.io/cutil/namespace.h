@@ -155,6 +155,7 @@
 #define gcu_file_stat_link GHOTIIO_CUTIL(gcu_file_stat_link)
 #define gcu_file_sync GHOTIIO_CUTIL(gcu_file_sync)
 #define gcu_file_tell GHOTIIO_CUTIL(gcu_file_tell)
+#define gcu_file_truncate GHOTIIO_CUTIL(gcu_file_truncate)
 #define gcu_file_write_bytes GHOTIIO_CUTIL(gcu_file_write_bytes)
 #define gcu_file_temp_abort GHOTIIO_CUTIL(gcu_file_temp_abort)
 #define gcu_file_temp_commit GHOTIIO_CUTIL(gcu_file_temp_commit)

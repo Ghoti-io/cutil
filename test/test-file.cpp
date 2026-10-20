@@ -370,6 +370,27 @@ TEST_F(Scratch, TempCreateThatRunsOutOfMemoryLeavesNoFile) {
   EXPECT_TRUE(reached_ok);
 }
 
+TEST_F(Scratch, TruncateShortensAndLengthensThroughTheHandle) {
+  put(at("t"), "0123456789");
+  GCU_File_Handle handle;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_open(&handle, at("t").c_str(),
+      GCU_FILE_OPEN_UPDATE, GCU_FILE_PERMS_DEFAULT, nullptr));
+  // A buffered write past the new end is flushed first, so it cannot grow the
+  // file back after the truncation.
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_seek(&handle, 0, GCU_FILE_SEEK_END));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&handle, "AB", 2));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_truncate(&handle, 4));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_close(&handle));
+  EXPECT_EQ("0123", Read(at("t")).str());
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_open(&handle, at("t").c_str(),
+      GCU_FILE_OPEN_UPDATE, GCU_FILE_PERMS_DEFAULT, nullptr));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_truncate(&handle, 6));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_close(&handle));
+  EXPECT_EQ(std::string("0123\0\0", 6), Read(at("t")).str());
+  GCU_File_Handle none{};
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_truncate(&none, 0));
+}
+
 TEST(FileTemp, TempHandleOfNothingIsRefusedByEveryCall) {
   GCU_File_Handle view = gcu_file_temp_handle(nullptr);
   EXPECT_EQ(nullptr, view.stream);
