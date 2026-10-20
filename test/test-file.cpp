@@ -293,6 +293,42 @@ TEST_F(Scratch, TempHandleSeeksAndWritesTheTemporarysOwnStream) {
   EXPECT_EQ("aXYdef", Read(dest).str());
 }
 
+namespace {
+/** An allocator that can be told to refuse everything from now on. */
+struct Refuser {
+  bool refuse = false;
+  GCU_Allocator allocator{};
+  Refuser() {
+    allocator.ctx = this;
+    allocator.malloc_fn = [](void * ctx, size_t size) -> void * {
+      return static_cast<Refuser *>(ctx)->refuse ? nullptr : malloc(size ? size : 1);
+    };
+    allocator.calloc_fn = [](void * ctx, size_t n, size_t size) -> void * {
+      return static_cast<Refuser *>(ctx)->refuse ? nullptr : calloc(n ? n : 1, size ? size : 1);
+    };
+    allocator.realloc_fn = [](void * ctx, void * ptr, size_t size) -> void * {
+      return static_cast<Refuser *>(ctx)->refuse ? nullptr : realloc(ptr, size ? size : 1);
+    };
+    allocator.free_fn = [](void *, void * ptr) { free(ptr); };
+  }
+};
+} // namespace
+
+TEST_F(Scratch, TempAbortRemovesTheFileEvenWhenItsAllocatorRefuses) {
+  // Abort is a cleanup path and cannot report a failure. On Windows it has to
+  // turn the name into UTF-16 first, which needs memory; with the caller's
+  // allocator refusing it used to leave the file behind.
+  Refuser refuser;
+  GCU_File_Temp temp;
+  ASSERT_EQ(GCU_FILE_OK,
+      gcu_file_temp_create(&temp, dir.c_str(), "starved", &refuser.allocator));
+  const string path = gcu_file_temp_path(&temp);
+  ASSERT_TRUE(exists(path));
+  refuser.refuse = true;
+  gcu_file_temp_abort(&temp);
+  EXPECT_FALSE(exists(path));
+}
+
 TEST(FileTemp, TempHandleOfNothingIsRefusedByEveryCall) {
   GCU_File_Handle view = gcu_file_temp_handle(nullptr);
   EXPECT_EQ(nullptr, view.stream);

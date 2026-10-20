@@ -131,11 +131,20 @@ static FILE * file_open(const char * path, const char * mode,
 /** Remove a path whose bytes are UTF-8. */
 static void file_remove(const char * path, const GCU_Allocator * allocator) {
 #ifdef _WIN32
-  /* TODO(windows): never compiled or run on Windows. */
-  wchar_t * wide = gcu_path_internal_to_wide(allocator, path);
+  // The name has to become UTF-16 first, which needs memory, and this is a
+  // cleanup path with no way to report that it could not have any. So a
+  // caller's allocator that refuses is followed by the system's, rather than
+  // leaving the temporary file on disk. Found by archive's allocation sweep
+  // under wine, which left a ".garc-" file behind for every refusal.
+  const GCU_Allocator * used = allocator;
+  wchar_t * wide = gcu_path_internal_to_wide(used, path);
+  if (!wide && allocator) {
+    used = NULL;
+    wide = gcu_path_internal_to_wide(used, path);
+  }
   if (wide) {
     _wremove(wide);
-    gcu_allocator_free(allocator, wide);
+    gcu_allocator_free(used, wide);
   }
 #else
   (void)allocator;
