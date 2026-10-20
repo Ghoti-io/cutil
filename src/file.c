@@ -912,6 +912,113 @@ GCU_File_Result gcu_file_truncate(GCU_File_Handle * handle, uint64_t length) {
   return GCU_FILE_OK;
 }
 
+GCU_File_Result gcu_file_next_data(GCU_File_Handle * handle,
+    uint64_t offset, uint64_t * out_start, uint64_t * out_end) {
+  if (!handle || !handle->stream || !out_start || !out_end
+      || offset > (uint64_t)INT64_MAX) {
+    return GCU_FILE_ERR_INVALID;
+  }
+  if (fflush(handle->stream) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+#ifdef _WIN32
+  const int fd = _fileno(handle->stream);
+  struct _stat64 info;
+  if (_fstat64(fd, &info) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+  const uint64_t size = (uint64_t)info.st_size;
+  if (offset >= size) {
+    *out_start = *out_end = size;
+    return GCU_FILE_OK;
+  }
+  // The allocated ranges from offset on. A file not marked sparse is one
+  // range, the whole of it; a filesystem that cannot answer is treated alike.
+  FILE_ALLOCATED_RANGE_BUFFER query;
+  FILE_ALLOCATED_RANGE_BUFFER range;
+  query.FileOffset.QuadPart = (LONGLONG)offset;
+  query.Length.QuadPart = (LONGLONG)(size - offset);
+  DWORD returned = 0;
+  const BOOL ok = DeviceIoControl((HANDLE)_get_osfhandle(fd),
+      FSCTL_QUERY_ALLOCATED_RANGES, &query, sizeof(query), &range,
+      sizeof(range), &returned, NULL);
+  if (!ok && GetLastError() != ERROR_MORE_DATA) {
+    *out_start = offset;
+    *out_end = size;
+    return GCU_FILE_OK;
+  }
+  if (returned < sizeof(range)) {
+    *out_start = *out_end = size;
+    return GCU_FILE_OK;
+  }
+  uint64_t start = (uint64_t)range.FileOffset.QuadPart;
+  uint64_t end = start + (uint64_t)range.Length.QuadPart;
+  *out_start = start < offset ? offset : start;
+  *out_end = end > size ? size : end;
+  return GCU_FILE_OK;
+#else
+  const int fd = fileno(handle->stream);
+  struct stat info;
+  if (fstat(fd, &info) != 0) {
+    return GCU_FILE_ERR_IO;
+  }
+  const uint64_t size = (uint64_t)info.st_size;
+  if (offset >= size) {
+    *out_start = *out_end = size;
+    return GCU_FILE_OK;
+  }
+#if defined(SEEK_DATA) && defined(SEEK_HOLE)
+  // lseek moves the descriptor under stdio, so stdio's own idea of the
+  // position is taken first and put back after.
+  const off_t saved = ftello(handle->stream);
+  if (saved < 0) {
+    return GCU_FILE_ERR_IO;
+  }
+  GCU_File_Result result = GCU_FILE_OK;
+  const off_t data = lseek(fd, (off_t)offset, SEEK_DATA);
+  if (data < 0 && errno == ENXIO) {
+    // No data from here to the end: the rest is one hole.
+    *out_start = *out_end = size;
+  }
+  else if (data < 0) {
+    // A filesystem that does not do this (EINVAL): the safe answer.
+    *out_start = offset;
+    *out_end = size;
+  }
+  else {
+    const off_t hole = lseek(fd, data, SEEK_HOLE);
+    *out_start = (uint64_t)data;
+    *out_end = hole < 0 ? size : (uint64_t)hole;
+    if (*out_end > size) {
+      *out_end = size;
+    }
+  }
+  if (fseeko(handle->stream, saved, SEEK_SET) != 0) {
+    result = GCU_FILE_ERR_IO;
+  }
+  return result;
+#else
+  *out_start = offset;
+  *out_end = size;
+  return GCU_FILE_OK;
+#endif
+#endif
+}
+
+GCU_File_Result gcu_file_allow_holes(GCU_File_Handle * handle) {
+  if (!handle || !handle->stream) {
+    return GCU_FILE_ERR_INVALID;
+  }
+#ifdef _WIN32
+  DWORD returned = 0;
+  // Refused by a filesystem without sparse files, which is not this caller's
+  // problem: the file is still written correctly, in full.
+  (void)DeviceIoControl((HANDLE)_get_osfhandle(_fileno(handle->stream)),
+      FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &returned, NULL);
+#endif
+  return GCU_FILE_OK;
+}
+
 /** Fill in @p out from a platform stat buffer. */
 #ifdef _WIN32
 static void file_info_from_find(GCU_File_Info * out,

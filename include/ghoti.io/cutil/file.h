@@ -540,6 +540,50 @@ GCU_API GCU_File_Result gcu_file_truncate(GCU_File_Handle * handle,
   uint64_t length);
 
 /**
+ * Find the next run of data in a file that may have holes.
+ *
+ * A sparse file's holes read back as zeroes without being stored. This
+ * reports where the stored part is: the first run of data at or after
+ * @p offset, as `[*out_start, *out_end)`. Past the last run - or at or past
+ * the end of the file - both are the file's length.
+ *
+ * **Data is the safe answer.** Where the platform or the filesystem cannot
+ * say (no `SEEK_DATA`, a filesystem without holes, a Windows file that is not
+ * marked sparse), the rest of the file is reported as one run of data. A hole
+ * reported as data reads back as the zeroes it holds, so a caller that copies
+ * the runs it is told about always copies the file correctly; what it may
+ * miss is the space a hole would have saved. The runs are what the
+ * filesystem has allocated, which can be larger than the bytes that are not
+ * zero.
+ *
+ * The position is not moved. Buffered output is flushed first, because the
+ * filesystem cannot report bytes it has not been given.
+ *
+ * @param handle The handle.
+ * @param offset Where to look from.
+ * @param out_start Receives where the run starts.
+ * @param out_end Receives where it ends, exclusive.
+ * @return ::GCU_FILE_OK, ::GCU_FILE_ERR_INVALID or ::GCU_FILE_ERR_IO.
+ */
+GCU_API GCU_File_Result gcu_file_next_data(GCU_File_Handle * handle,
+  uint64_t offset, uint64_t * out_start, uint64_t * out_end);
+
+/**
+ * Let a file being written keep holes.
+ *
+ * A write past the end, or a truncation that lengthens, leaves a hole on
+ * POSIX filesystems that support them, with nothing to ask first; this does
+ * nothing there. NTFS leaves holes only in a file marked sparse, so on Windows
+ * this marks it. Call it before writing the parts of a file that are not
+ * holes. A filesystem that cannot keep holes (FAT, say) is not an error: the
+ * file is written in full and reads the same.
+ *
+ * @param handle The handle, open for writing.
+ * @return ::GCU_FILE_OK or ::GCU_FILE_ERR_INVALID.
+ */
+GCU_API GCU_File_Result gcu_file_allow_holes(GCU_File_Handle * handle);
+
+/**
  * A handle onto a temporary file's open stream, for the calls above.
  *
  * ::gcu_file_temp_stream() gives back a `FILE *`, and plain stdio cannot seek

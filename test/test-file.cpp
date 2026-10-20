@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 #include <sys/stat.h>
 #include <gtest/gtest.h>
@@ -389,6 +390,100 @@ TEST_F(Scratch, TruncateShortensAndLengthensThroughTheHandle) {
   EXPECT_EQ(std::string("0123\0\0", 6), Read(at("t")).str());
   GCU_File_Handle none{};
   EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_truncate(&none, 0));
+}
+
+TEST_F(Scratch, NextDataReportsTheStoredRunsOfASparseFile) {
+  // 1 MiB with data at the start and at 512 KiB, the rest never written. On a
+  // filesystem that keeps holes the runs are where those writes went; on one
+  // that does not, the whole file is one run. Either way every byte that is
+  // not zero is inside a run - which is the promise - and the runs are in
+  // order and inside the file.
+  GCU_File_Handle handle;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_open(&handle, at("s").c_str(),
+      GCU_FILE_OPEN_WRITE, GCU_FILE_PERMS_DEFAULT, nullptr));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&handle, "head", 4));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_seek(&handle, 512 * 1024, GCU_FILE_SEEK_SET));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&handle, "middle", 6));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_truncate(&handle, 1024 * 1024));
+  // Still writing: the query flushes first, and leaves the position alone.
+  uint64_t start = 0;
+  uint64_t end = 0;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_next_data(&handle, 0, &start, &end));
+  int64_t where = 0;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_tell(&handle, &where));
+  EXPECT_EQ(512 * 1024 + 6, where);
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_close(&handle));
+
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_open(&handle, at("s").c_str(),
+      GCU_FILE_OPEN_READ, GCU_FILE_PERMS_DEFAULT, nullptr));
+  std::vector<std::pair<uint64_t, uint64_t>> runs;
+  uint64_t from = 0;
+  for (int guard = 0; guard < 1000; ++guard) {
+    ASSERT_EQ(GCU_FILE_OK, gcu_file_next_data(&handle, from, &start, &end));
+    ASSERT_LE(start, end);
+    ASSERT_GE(start, from);
+    if (start == end) {
+      EXPECT_EQ(start, 1024u * 1024u) << "past the last run is the length";
+      break;
+    }
+    runs.emplace_back(start, end);
+    from = end;
+  }
+  ASSERT_FALSE(runs.empty());
+  const auto covered = [&](uint64_t at_byte) {
+    for (const auto & run : runs) {
+      if (at_byte >= run.first && at_byte < run.second) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_TRUE(covered(0));
+  EXPECT_TRUE(covered(3));
+  EXPECT_TRUE(covered(512 * 1024));
+  EXPECT_TRUE(covered(512 * 1024 + 5));
+  // Reading the runs did not move the reader.
+  char first[4];
+  size_t got = 0;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_read_bytes(&handle, first, 4, &got));
+  EXPECT_EQ(std::string("head"), std::string(first, got));
+  // At and past the end.
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_next_data(&handle, 1024 * 1024, &start, &end));
+  EXPECT_EQ(start, 1024u * 1024u);
+  EXPECT_EQ(end, 1024u * 1024u);
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_next_data(&handle, 5u << 20, &start, &end));
+  EXPECT_EQ(start, 1024u * 1024u);
+#ifndef _WIN32
+  // Where the filesystem keeps holes, the query must find them: a run list
+  // of one whole-file run there would be the safe answer given lazily.
+  struct stat info;
+  ASSERT_EQ(0, stat(at("s").c_str(), &info));
+  if (static_cast<long long>(info.st_blocks) * 512 < 256 * 1024) {
+    EXPECT_GE(runs.size(), 2u) << "holes kept, and not reported";
+  }
+#endif
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_close(&handle));
+  GCU_File_Handle none{};
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_next_data(&none, 0, &start, &end));
+}
+
+TEST_F(Scratch, AllowHolesThenSeekingPastTheEndLeavesZeroes) {
+  // What it changes is only visible on NTFS. Everywhere it must leave the
+  // bytes alone, and the hole must read back as zeroes.
+  GCU_File_Handle handle;
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_open(&handle, at("h").c_str(),
+      GCU_FILE_OPEN_WRITE, GCU_FILE_PERMS_DEFAULT, nullptr));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_allow_holes(&handle));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&handle, "a", 1));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_seek(&handle, 70000, GCU_FILE_SEEK_SET));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_write_bytes(&handle, "b", 1));
+  ASSERT_EQ(GCU_FILE_OK, gcu_file_close(&handle));
+  std::string want(70001, '\0');
+  want[0] = 'a';
+  want[70000] = 'b';
+  EXPECT_TRUE(Read(at("h")).str() == want);
+  GCU_File_Handle none{};
+  EXPECT_EQ(GCU_FILE_ERR_INVALID, gcu_file_allow_holes(&none));
 }
 
 TEST(FileTemp, TempHandleOfNothingIsRefusedByEveryCall) {
