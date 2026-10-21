@@ -30,7 +30,7 @@ string toUtf8(const vector<GCU_Char16> & in) {
 } // namespace
 
 TEST(Utf, AsciiRoundTrips) {
-  string in = "/home/corey/file.txt";
+  string in = "/home/user/file.txt";
   ASSERT_EQ(in, toUtf8(toUtf16(in)));
 }
 

@@ -577,7 +577,7 @@ test passes against the mutant.  Pinning it needs an allocator that refuses its
 of its own needs a harness shaped like that, not a blanket failure.
 
 Nobody would have found this by reading the diff of the library that changed.
-It was found by the session that owned the caller, corrected by a third session
+It was found by the work on the caller, corrected by a third reader
 that read the *old* cutil source rather than reasoning about what it must have
 done, and it never stops compiling at any point.  Where the old code could not
 say what it meant, re-read the condition; do not translate it.
