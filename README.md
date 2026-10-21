@@ -114,7 +114,7 @@ instead of copying it. `filelock.h` locks a whole file between processes.
 last operating-system error, without caring which operating system.
 `subprocess.h` runs a program and collects its output. `library.h` loads a
 shared library at run time. `random.h` is one handle over a seeded generator (MT19937, MT19937-64, xoshiro256++, PCG64, SplitMix64, Java's `java.util.Random`), or over an engine another library supplies.
-`type.h` is the sized unions and the fixed-width floats.
+`type.h` is the sized unions and the fixed-width floats. `base64.h` is RFC 4648 base64 with the decoder's strictness chosen at the call.
 
 ## Documentation
 
@@ -123,6 +123,7 @@ The long arguments live next to the modules they belong to:
 | Page | What it settles |
 | --- | --- |
 | [documentation/memory.md](documentation/memory.md) | The allocator and the traced heap |
+| [documentation/base64.md](documentation/base64.md) | Base64 and its strictness options |
 | [documentation/file.md](documentation/file.md) | Whole-file read and atomic replace |
 | [documentation/path.md](documentation/path.md) | Lexical paths and the environment |
 | [documentation/thread-pool.md](documentation/thread-pool.md) | The worker pool |

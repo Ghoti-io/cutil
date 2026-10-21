@@ -354,6 +354,7 @@ LIBOBJECTS := \
 	$(OBJ_DIR)/array.o \
 	$(OBJ_DIR)/atomic.o \
 	$(OBJ_DIR)/barrier.o \
+	$(OBJ_DIR)/base64.o \
 	$(OBJ_DIR)/cond.o \
 	$(OBJ_DIR)/dir.o \
 	$(OBJ_DIR)/error.o \
@@ -390,7 +391,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps check-fiber-defects check-loop-defects
+TEST_GATES ?= check-symbols check-win32-parse check-win32-linkage check-clang check-rebuild check-stamps check-fiber-defects check-loop-defects check-base64-defects
 
 # Used by check-clang. Empty when clang is not installed, which that
 # target reports rather than failing over.
@@ -412,7 +413,7 @@ all: $(APP_DIR)/$(TARGET) ## Build the shared library
 # Dependency Inclusion
 ####################################################################
 # Compiler-generated .d files (see -MMD -MP -MF in compile commands).
-TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-fiber test-socket test-loop test-path test-file test-dir
+TEST_NAMES := test-macros test-type test-cond test-once test-rwlock test-error test-utf test-tls test-env test-library test-filelock test-atomic test-barrier test-mmap test-subprocess test-memory test-memory-inline test-hash test-mutex test-random test-semaphore test-string test-base64 test-thread test-vector test-array test-allocator test-safemath test-safemath-portable test-pool test-sequencer test-fiber test-socket test-loop test-path test-file test-dir
 TEST_BINARIES := $(foreach t,$(TEST_NAMES),$(APP_DIR)/$(t)$(EXE_EXTENSION))
 TEST_DEPFILES := $(addprefix $(APP_DIR)/,$(TEST_NAMES:%=%.d))
 DEPFILES := $(LIBOBJECTS:.o=.d) $(TEST_DEPFILES)
@@ -763,6 +764,11 @@ $(APP_DIR)/test-semaphore$(EXE_EXTENSION): test/test-semaphore.cpp $(FLAGS_STAMP
 	@printf "\n### Compiling Semaphore Test ###\n"
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-semaphore.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
+
+$(APP_DIR)/test-base64$(EXE_EXTENSION): test/test-base64.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
+	@printf "\n### Compiling Base64 Test ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -MMD -MP -MF $(APP_DIR)/test-base64.d -o $@ $< $(LDFLAGS) $(TESTFLAGS) $(CUTILLIBRARY)
 
 $(APP_DIR)/test-string$(EXE_EXTENSION): test/test-string.cpp $(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Compiling String Test ###\n"
@@ -1458,6 +1464,12 @@ endef
 $(eval $(call TSAN_FIBER_PLANT_RULE,no-tsan,NO_TSAN))
 
 FIBER_PLANT_LIBS := $(foreach p,$(FIBER_FP_PLANTS),$(APP_DIR)/plant-fiber-$(word 1,$(subst :, ,$(p)))/$(TARGET))
+
+.PHONY: check-base64-defects
+check-base64-defects: ## Plant each way the base64 codec can be wrong and require the tests to notice
+check-base64-defects: $(APP_DIR)/$(TARGET) $(FLAGS_STAMP)
+	@B64_CC='$(CC)' B64_CFLAGS='$(CFLAGS) $(INCLUDE)' B64_CXX='$(CXX)' B64_CXXFLAGS='$(CXXFLAGS)' \
+	 B64_LIBS='$(TESTFLAGS)' B64_WORK='$(BUILD_DIR)/base64-plants' python3 tools/check-base64-defects.py
 
 .PHONY: check-fiber-defects
 check-fiber-defects: ## Plant each way the fibers can be wrong and require the tests to notice
